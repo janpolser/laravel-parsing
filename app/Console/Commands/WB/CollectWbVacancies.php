@@ -3,8 +3,8 @@
 namespace App\Console\Commands\WB;
 
 use Illuminate\Console\Command;
-use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Http;
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use GuzzleHttp\Cookie\CookieJar;
@@ -12,7 +12,7 @@ use GuzzleHttp\Cookie\CookieJar;
 class CollectWbVacancies extends Command
 {
     
-    protected $signature = 'parser:collect-wb-vacancies
+    protected $signature = 'wb:collect-wb-vacancies
         {--limit=500 : Размер страницы (макс. 1000)}
         {--start-offset=0 : С какого offset начинать}
         {--max-pages=1 : Сколько страниц тянуть (1 — только один запрос)}
@@ -20,28 +20,20 @@ class CollectWbVacancies extends Command
 
     protected $description = 'Собирает вакансии WB (career.wb.ru) и сохраняет в Excel (PhpSpreadsheet)';
 
-    $jar = CookieJar::fromArray([
-    '_wbauid'        => '10374820771762851067',
-    'popupDisplayed' => 'false',
-], 'career.wb.ru');
+    private const COLUMN_SCHEMA = [
+        'id'                    => 'ID',
+        'name'                  => 'Название',
+        'direction_title'       => 'Направление',
+        'direction_role_title'  => 'Роль',
+        'experience_type_title' => 'Опыт',
+        'city_title'            => 'Город',
+        'employment_types'      => 'Тип занятости',
+        'url' => 'Ссылка'
+    ];
+
 
 // опциональный прогрев, чтобы сервер сам выдал доп. куки с главной
-Http::withOptions([
-        'cookies' => $jar,
-        'curl' => [
-            CURLOPT_TIMEOUT => 20,
-            CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
-        ],
-    ])
-    ->withHeaders([
-        'User-Agent' => 'JobrateBot/1.0 (+https://jobrate.local)',
-        'Accept'     => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Referer'    => 'https://career.wb.ru/',
-        'Origin'     => 'https://career.wb.ru',
-    ])
-    ->get('https://career.wb.ru/');
+
 
     public function handle(): int
     {
@@ -59,34 +51,72 @@ Http::withOptions([
             return self::INVALID;
         }
 
-        $all = [];
+        $jar = new CookieJar();
+
+        // прогреваем главную страницу WB, чтобы получить валидные Set-Cookie
+        $this->info('Прогреваю сессию career.wb.ru...');
+
+        $warmup = Http::withOptions([
+                'cookies' => $jar,
+                'curl' => [
+                    CURLOPT_TIMEOUT => 20,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
+                ],
+            ])
+            ->withHeaders([
+                'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
+                'Accept'     => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer'    => 'https://career.wb.ru/',
+                'Origin'     => 'https://career.wb.ru',
+            ])
+            ->get('https://career.wb.ru/');
+
+        $this->info("Warmup status: {$warmup->status()}");
+
+        // необязательно, но можно вывести какие куки были получены
+        foreach ($jar->toArray() as $cookie) {
+            $this->line("Cookie: {$cookie['Name']}={$cookie['Value']}");
+        }
+
+        $normalizedRows = [];
         $pagesFetched = 0;
 
         while ($pagesFetched < $maxPages) {
             $url = 'https://career.wb.ru/crm-api/api/v1/pub/vacancies';
             $resp = Http::withHeaders([
-                    'Accept' => 'application/json',
-                    'User-Agent' => 'JobrateBot/1.0 (+https://jobrate.local)',
-                    'Cookie' => '_wbauid=10374820771762851067; popupDisplayed=false',
+                    'Accept'     => 'application/json',
+                    'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
+                    'Referer'    => 'https://career.wb.ru/',
+                    'Origin'     => 'https://career.wb.ru',
                 ])
-                // Если тебе принципиально “через cURL”, вот так прокидываются низкоуровневые опции:
                 ->withOptions([
+                    'cookies' => $jar, // используем те же куки, полученные при прогреве
                     'curl' => [
                         CURLOPT_TIMEOUT => 20,
                         CURLOPT_CONNECTTIMEOUT => 10,
                         CURLOPT_FOLLOWLOCATION => true,
+                        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
                     ],
                 ])
                 ->get($url, ['limit' => $limit, 'offset' => $offset]);
-
+                
             if (!$resp->ok()) {
                 $this->error("HTTP {$resp->status()} при запросе {$url}?limit={$limit}&offset={$offset}");
                 return self::FAILURE;
             }
 
             $json = $resp->json();
-            // Подстройся под фактическую структуру: чаще всего список в ключе 'items' или 'data'
-            $items = $json['items'] ?? $json['data'] ?? (is_array($json) ? $json : []);
+            // Подстраиваемся под фактическую структуру WB (items лежат в data.items)
+            $items = [];
+            if (isset($json['items']) && is_array($json['items'])) {
+                $items = $json['items'];
+            } elseif (isset($json['data']['items']) && is_array($json['data']['items'])) {
+                $items = $json['data']['items'];
+            } elseif (is_array($json)) {
+                $items = $json;
+            }
 
             if (!is_array($items) || empty($items)) {
                 $this->info("Пусто на offset={$offset}. Останавливаюсь.");
@@ -96,7 +126,7 @@ Http::withOptions([
             // Нормализуем массив элементов (ожидаем массив объектов)
             foreach ($items as $row) {
                 if (is_array($row)) {
-                    $all[] = $this->flatten($row);
+                    $normalizedRows[] = $this->normalizeRow($row);
                 }
             }
 
@@ -105,13 +135,13 @@ Http::withOptions([
             $pagesFetched++;
         }
 
-        if (empty($all)) {
+        if (empty($normalizedRows)) {
             $this->warn('Данных нет — писать нечего.');
             return self::SUCCESS;
         }
 
-        // Собираем заголовки как объединение ключей
-        $headers = $this->collectHeaders($all);
+        $columnKeys = array_keys(self::COLUMN_SCHEMA);
+        $headers    = array_values(self::COLUMN_SCHEMA);
 
         // Готовим Excel
         $spreadsheet = new Spreadsheet();
@@ -121,16 +151,18 @@ Http::withOptions([
         // Записываем заголовки
         $col = 1;
         foreach ($headers as $h) {
-            $sheet->setCellValueByColumnAndRow($col, 1, $h);
+            $cell = Coordinate::stringFromColumnIndex($col) . '1';
+            $sheet->setCellValue($cell, $h);
             $col++;
         }
 
         // Записываем строки
         $rowIdx = 2;
-        foreach ($all as $row) {
+        foreach ($normalizedRows as $row) {
             $col = 1;
-            foreach ($headers as $key) {
-                $sheet->setCellValueByColumnAndRow($col, $rowIdx, $row[$key] ?? null);
+            foreach ($columnKeys as $key) {
+                $cell = Coordinate::stringFromColumnIndex($col) . $rowIdx;
+                $sheet->setCellValue($cell, $row[$key] ?? null);
                 $col++;
             }
             $rowIdx++;
@@ -148,48 +180,26 @@ Http::withOptions([
         return self::SUCCESS;
     }
 
-    /**
-     * Плоское представление массива (dot-style), чтобы не гадать про вложенность
-     */
-    private function flatten(array $item, string $prefix = ''): array
+    private function normalizeRow(array $item): array
     {
-        $flat = [];
-        foreach ($item as $k => $v) {
-            $key = $prefix === '' ? (string)$k : "{$prefix}.{$k}";
-            if (is_array($v)) {
-                // Слишком глубокие/массивы объектов — ужимаем в JSON
-                $isAssoc = Arr::isAssoc($v);
-                if ($isAssoc) {
-                    $flat = $flat + $this->flatten($v, $key);
-                } else {
-                    $flat[$key] = json_encode($v, JSON_UNESCAPED_UNICODE);
+        $employmentTypes = [];
+        if (isset($item['employment_types']) && is_array($item['employment_types'])) {
+            foreach ($item['employment_types'] as $type) {
+                if (is_array($type) && isset($type['title'])) {
+                    $employmentTypes[] = $type['title'];
                 }
-            } else {
-                // Нормализуем булевы/даты при необходимости
-                $flat[$key] = is_bool($v) ? ($v ? 1 : 0) : $v;
             }
         }
-        return $flat;
-    }
 
-    private function collectHeaders(array $rows): array
-    {
-        $keys = [];
-        foreach ($rows as $row) {
-            foreach (array_keys($row) as $k) {
-                $keys[$k] = true;
-            }
-        }
-        // Стабильный порядок: важные поля вперед, затем остальные по алфавиту
-        $priority = [
-            'id','title','name','department','city','location.city','salary.from','salary.to',
-            'createdAt','updatedAt','publishedAt','url'
+        return [
+            'id'                    => $item['id'] ?? null,
+            'name'                  => $item['name'] ?? null,
+            'direction_title'       => $item['direction_title'] ?? null,
+            'direction_role_title'  => $item['direction_role_title'] ?? null,
+            'experience_type_title' => $item['experience_type_title'] ?? null,
+            'city_title'            => $item['city_title'] ?? null,
+            'employment_types'      => empty($employmentTypes) ? null : implode(', ', $employmentTypes),
+            'url' => 'https://career.wb.ru/vacancies/' . $item['id']
         ];
-        $existing = array_keys($keys);
-        $ordered = array_values(array_unique(array_merge(
-            array_values(array_intersect($priority, $existing)),
-            array_diff($existing, $priority)
-        )));
-        return $ordered;
     }
 }
