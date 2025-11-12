@@ -4,7 +4,6 @@ namespace App\Console\Commands\Yandex;
 
 use DateTime;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Storage;
 use SimpleXMLElement;
 
 class ConvertVacanciesToXml extends Command
@@ -23,6 +22,7 @@ class ConvertVacanciesToXml extends Command
         // Проверяем существование входного файла
         if (!file_exists($inputPath)) {
             $this->error("Input file not found: {$inputPath}");
+
             return 1;
         }
 
@@ -33,13 +33,14 @@ class ConvertVacanciesToXml extends Command
 
             if (json_last_error() !== JSON_ERROR_NONE) {
                 $this->error('Invalid JSON format: ' . json_last_error_msg());
+
                 return 1;
             }
 
             // Создаем XML структуру
             date_default_timezone_set('Europe/Moscow');
 
-            $date = new DateTime();
+            $date = new DateTime;
             $xml = new SimpleXMLElement('<?xml version="1.0" encoding="utf-8"?><source></source>');
             $xml->addAttribute('creation-time', $date->format('Y-m-d H:i:s') . ' GMT+3');
             $xml->addAttribute('host', 'crowd.yandex.ru');
@@ -49,7 +50,7 @@ class ConvertVacanciesToXml extends Command
             // Обрабатываем каждое направление и вакансии
             foreach ($vacanciesData as $direction) {
                 foreach ($direction['vacancies'] as $vacancy) {
-                    $this->addVacancyToXml($vacanciesNode, $vacancy, $direction);
+                    $this->addVacancyToXml($vacanciesNode, $vacancy);
                 }
             }
 
@@ -58,17 +59,18 @@ class ConvertVacanciesToXml extends Command
             file_put_contents($outputPath, $xmlString);
 
             $this->info("Successfully converted vacancies to XML: {$outputPath}");
-            $this->info("Total vacancies processed: " . count($vacanciesNode->vacancy));
+            $this->info('Total vacancies processed: ' . count($vacanciesNode->vacancy));
 
             return 0;
 
         } catch (\Exception $e) {
-            $this->error("Error during conversion: " . $e->getMessage());
+            $this->error('Error during conversion: ' . $e->getMessage());
+
             return 1;
         }
     }
 
-    private function addVacancyToXml(SimpleXMLElement $parent, array $vacancy, array $direction)
+    private function addVacancyToXml(SimpleXMLElement $parent, array $vacancy)
     {
         $vacancyNode = $parent->addChild('vacancy');
 
@@ -78,18 +80,17 @@ class ConvertVacanciesToXml extends Command
 
         date_default_timezone_set('Europe/Moscow');
 
-        $date = new DateTime();
+        $date = new DateTime;
         $vacancyNode->addChild('creation-date', $date->format('Y-m-d H:i:s') . ' GMT+3');
-//        $vacancyNode->addChild('update-date', $date->format('Y-m-d H:i:s') . ' GMT+3');
 
         // Зарплата
         $this->processSalary($vacancyNode, $vacancy['payment'] ?? '');
 
         // Категории
-        $this->processCategories($vacancyNode, $vacancy, $direction);
+        $this->processCategories($vacancyNode, $vacancy);
 
         // Название должности
-        $vacancyNode->addChild('job-name', $this->escapeForXml($vacancy['title']));
+        $vacancyNode->addChild('job-name', $this->escapeForXml($this->cleanupText($vacancy['title'])));
 
         // Занятость и график
         $this->processEmploymentAndSchedule($vacancyNode, $vacancy);
@@ -97,9 +98,6 @@ class ConvertVacanciesToXml extends Command
         // Описание - исправляем &nbsp; на обычные пробелы
         $description = $this->cleanupText($vacancy['description'] ?? '');
         $vacancyNode->addChild('description', $this->escapeForXml($description));
-
-        // Обязанности (используем описание как обязанности)
-        $vacancyNode->addChild('duty', $this->escapeForXml($description));
 
         // Условия
         $this->processTerms($vacancyNode, $vacancy);
@@ -112,64 +110,47 @@ class ConvertVacanciesToXml extends Command
 
         // Компания
         $this->processCompany($vacancyNode);
-
-        // Campaign ID
-        $vacancyNode->addChild('campaign', $this->generateUuid());
     }
 
-    private function processSalary(SimpleXMLElement $vacancyNode, string $payment)
+    private function processSalary(SimpleXMLElement $vacancyNode, string $payment): void
     {
-        // Парсим зарплату из строки
-        $salary = '';
-        $currency = 'руб';
+        $salary = $this->normalizeSalary($payment);
 
-        if (!empty($payment)) {
-            // Извлекаем числа из строки зарплаты
-            preg_match_all('/\d+[\s\d]*\d+/', $payment, $matches);
+        if ($salary) {
+            $vacancyNode->addChild('salary', $salary);
+            $vacancyNode->addChild('currency', 'RUB');
+        }
+    }
 
-            $clean_string = str_replace('&nbsp;', ' ', $payment);
-            $clean_string = str_replace(["\u{202F}", ' на руки', ' ₽'], '', $clean_string);
-            $clean_string = explode(' +', $clean_string)[0];
-
-// Оставляем только цифры, пробелы и слова "от"/"до"
-            $clean_string = preg_replace('/[^\d\sотдо]/u', '', $clean_string);
-            $clean_string = preg_replace('/\s+/', ' ', $clean_string); // убираем лишние пробелы
-            $clean_string = trim($clean_string);
-            dump("было - " . $payment . " стало - " . $clean_string);
-
-            if (!empty($matches[0])) {
-                $numbers = $matches[0];
-                if (count($numbers) >= 2) {
-                    $salary = implode('-', array_slice($numbers, 0, 2));
-                } else {
-                    $salary = $numbers[0];
-                }
-            }
+    private function normalizeSalary(?string $payment): string
+    {
+        if (empty($payment)) {
+            return '';
         }
 
-        $vacancyNode->addChild('salary', $salary);
-        $vacancyNode->addChild('currency', $currency);
+        // Заменяем все специальные символы и пробелы
+        $cleaned = str_replace(['&nbsp;', ' на руки', ' ₽'], ' ', $payment);
+        $cleaned = str_replace("\xE2\x80\xAF", ' ', $cleaned); // Узкий пробел
+
+        // Убираем всё после " +"
+        $cleaned = explode(' +', $cleaned)[0];
+
+        // Оставляем только цифры, пробелы и ключевые слова
+        $cleaned = preg_replace('/[^\d\sотдо]/u', '', $cleaned);
+
+        // Нормализуем пробелы
+        $normalized = trim(preg_replace('/\s+/', ' ', $cleaned));
+
+        // Убираем пробелы между цифрами
+        return preg_replace('/(\d)\s+(\d)/', '$1$2', $normalized);
     }
 
-    private function processCategories(SimpleXMLElement $vacancyNode, array $vacancy, array $direction)
+    private function processCategories(SimpleXMLElement $vacancyNode, array $vacancy)
     {
-        $directionName = $direction['direction-name'] ?? 'Другое';
+        $directionName = $vacancy['tags']['direction'][0] ?? 'Без специальной подготовки';
 
         $categoryNode = $vacancyNode->addChild('category');
         $categoryNode->addChild('industry', $this->escapeForXml($directionName));
-
-        // Используем теги как специализации
-        $tags = $vacancy['tags'] ?? [];
-        $specializations = array_merge(
-            $tags['direction'] ?? [],
-            $tags['employment'] ?? []
-        );
-
-        if (!empty($specializations)) {
-            $categoryNode->addChild('specialization', $this->escapeForXml(implode(', ', $specializations)));
-        } else {
-            $categoryNode->addChild('specialization', $this->escapeForXml($directionName));
-        }
     }
 
     private function processEmploymentAndSchedule(SimpleXMLElement $vacancyNode, array $vacancy)
@@ -194,7 +175,6 @@ class ConvertVacanciesToXml extends Command
     private function processTerms(SimpleXMLElement $vacancyNode, array $vacancy)
     {
         $termNode = $vacancyNode->addChild('term');
-        $termNode->addChild('contract', 'постоянный');
 
         $text = [];
         $tags = $vacancy['tags'] ?? [];
@@ -212,26 +192,10 @@ class ConvertVacanciesToXml extends Command
     {
         $requirementNode = $vacancyNode->addChild('requirement');
 
-        // Возраст
-        $requirementNode->addChild('age', '18-60');
-
-        // Пол (не указан в исходных данных)
-        $requirementNode->addChild('sex', '');
-
-        // Образование
-        $requirementNode->addChild('education', 'Высшее образование предпочтительно');
-
         // Опыт работы
         $experience = $vacancy['tags']['experience'] ?? 'без опыта';
         $requirementNode->addChild('experience', $this->escapeForXml($experience));
 
-        // Квалификация
-        $qualification = [];
-        $qualification[] = "Опыт: " . ($vacancy['tags']['experience'] ?? 'без опыта');
-
-        if (!empty($qualification)) {
-            $requirementNode->addChild('qualification', $this->escapeForXml(implode('. ', $qualification)));
-        }
     }
 
     private function processAddresses(SimpleXMLElement $vacancyNode, array $vacancy)
@@ -241,9 +205,8 @@ class ConvertVacanciesToXml extends Command
 
         $tags = $vacancy['tags'] ?? [];
 
-        if (($tags['remotely'] ?? '') === 'локально') {
-            $addressNode->addChild('location', 'Москва, офис Яндекса');
-            $addressNode->addChild('metro', 'Охотный ряд');
+        if ($tags['remotely'] ?? '') {
+            $addressNode->addChild('location', $tags['remotely']);
         } else {
             $addressNode->addChild('location', 'Удаленная работа');
         }
@@ -254,37 +217,9 @@ class ConvertVacanciesToXml extends Command
         $companyNode = $vacancyNode->addChild('company');
 
         $companyNode->addChild('name', 'Яндекс');
-        $companyNode->addChild('description', $this->escapeForXml('Яндекс — российская транснациональная компания в отрасли информационных технологий, чьё головное юридическое лицо зарегистрировано в Нидерландах, владеющая одноимённой системой поиска в Сети, интернет-порталом и веб-службами в нескольких странах. Наиболее заметное положение занимает на рынках России, Беларуси, Казахстана и Турции.'));
-        $companyNode->addChild('logo', 'https://yastatic.net/s3/lyceum/landing/images/logo-ya.svg');
-        $companyNode->addChild('site', 'https://yandex.ru/');
-        $companyNode->addChild('email', 'recruitment@yandex-team.ru');
-        $companyNode->addChild('phone', '+7-495-739-70-00');
         $companyNode->addChild('hr-agency', 'false');
     }
 
-    private function generateUuid()
-    {
-        return sprintf(
-            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
-            mt_rand(0, 0xffff),
-            mt_rand(0, 0xffff),
-            mt_rand(0, 0xffff),
-            mt_rand(0, 0x0fff) | 0x4000,
-            mt_rand(0, 0x3fff) | 0x8000,
-            mt_rand(0, 0xffff),
-            mt_rand(0, 0xffff),
-            mt_rand(0, 0xffff)
-        );
-    }
-
-    private function formatDateForXml()
-    {
-        return '2014-06-22 22:00:22 GMT+2';
-    }
-
-    /**
-     * Очищает текст от HTML entities и заменяет &nbsp; на обычные пробелы
-     */
     private function cleanupText(string $text): string
     {
         // Заменяем &nbsp; на обычные пробелы
@@ -302,9 +237,6 @@ class ConvertVacanciesToXml extends Command
         return trim($text);
     }
 
-    /**
-     * Экранирует специальные XML символы
-     */
     private function escapeForXml(string $value): string
     {
         return htmlspecialchars($value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
