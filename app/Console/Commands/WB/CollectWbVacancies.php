@@ -16,7 +16,7 @@ class CollectWbVacancies extends Command
         {--limit=500 : Размер страницы (макс. 1000)}
         {--start-offset=0 : С какого offset начинать}
         {--max-pages=1 : Сколько страниц тянуть (1 — только один запрос)}
-        {--outfile=wb_vacancies.xlsx : Имя xlsx в storage/app}';
+        {--outfile=wb_vacancies : Имя xlsx в storage/app}';
 
     protected $description = 'Собирает вакансии WB (career.wb.ru) и сохраняет в Excel (PhpSpreadsheet)';
 
@@ -40,7 +40,7 @@ class CollectWbVacancies extends Command
         $limit       = (int) $this->option('limit');
         $offset      = (int) $this->option('start-offset');
         $maxPages    = (int) $this->option('max-pages');
-        $outFileName = (string) $this->option('outfile');
+        $outFileName = (string) $this->option('outfile') . today() .  '.xlsx';
 
         if ($limit < 1 || $limit > 1000) {
             $this->error('Параметр --limit должен быть в диапазоне 1..1000');

@@ -10,7 +10,7 @@ use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 
 class CollectVacancies extends Command
 {
-    protected $signature = 'rzhd:collect-vacancies {--outfile=rzhd_vacancies.xlsx : Имя xlsx в storage/app}';
+    protected $signature = 'rzhd:collect-vacancies {--outfile=rzhd_vacancies : Имя xlsx в storage/app}';
     protected $description = 'Собирает вакансии с team.rzd.ru и сохраняет в Excel';
 
     private const COLUMN_SCHEMA = [
@@ -33,7 +33,7 @@ class CollectVacancies extends Command
 
     public function handle(): int
     {
-        $outFileName = (string)$this->option('outfile');
+        $outFileName = (string)$this->option('outfile') . today() . '.xlsx';
 
         $baseUrl = 'https://team.rzd.ru/api/v1/career/vacancies';
 
