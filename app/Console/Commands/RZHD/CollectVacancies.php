@@ -3,142 +3,90 @@
 namespace App\Console\Commands\RZHD;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
-use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
-use PhpOffice\PhpSpreadsheet\Spreadsheet;
-use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 
 class CollectVacancies extends Command
 {
-    protected $signature = 'rzhd:collect-vacancies {--outfile=rzhd_vacancies : Имя xlsx в storage/app}';
-    protected $description = 'Собирает вакансии с team.rzd.ru и сохраняет в Excel';
+    protected $signature = 'rzhd:collect-vacancies {--outfile=rzhd_vacancies : Базовое имя json-файла в storage/app}';
+    protected $description = 'Собирает вакансии с team.rzd.ru и формирует массив по спецификации YVL';
 
-    private const COLUMN_SCHEMA = [
-        'id'            => 'ID',
-        'position_id'   => 'Position ID',
-        'salary_from'   => 'Зарплата от',
-        'salary_to'     => 'Зарплата до',
-        'salary_month'  => 'Зарплата в месяц',
-        'schedule'      => 'График',
-        'experience'    => 'Опыт',
-        'employment_type'=> 'Тип занятости',
-        'status'        => 'Статус',
-        'published_at'  => 'Дата публикации',
-        'locality_id'   => 'ID города',
-        'locality_name' => 'Город',
-        'direction_title'=> 'Направление',
-        'speciality_title'=> 'Специальность',
-        'url' => 'Ссылка'
+    private const BASE_URL = 'https://team.rzd.ru/api/v1/career/vacancies';
+    private const HOST = 'team.rzd.ru';
+    private const TIMEZONE = 'Europe/Moscow';
+    private const EMPLOYMENT_LABELS = [
+        'full' => 'полная',
+        'part' => 'частичная',
+        'temporary' => 'временная',
+        'internship' => 'стажировка',
     ];
+    private const SCHEDULE_LABELS = [
+        'shift' => 'сменный',
+        'flexible' => 'гибкий',
+        'remote' => 'удаленная работа',
+        'fully' => 'полная',
+        'day' => 'дневной',
+    ];
+
+    private array $detailCache = [];
+    private array $detailByTitle = [];
 
     public function handle(): int
     {
-        $outFileName = (string)$this->option('outfile') . today() . '.xlsx';
+        $outFileName = (string)$this->option('outfile') . today() . '.json';
 
-        $baseUrl = 'https://team.rzd.ru/api/v1/career/vacancies';
-
-        // 1 — первичный запрос для получения count
         $this->info('Запрос для получения общего количества вакансий...');
-        $resp1 = Http::withHeaders([
-            'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Accept'     => 'application/json, text/plain, */*',
-            'Origin'     => 'https://team.rzd.ru',
-            'Referer'    => 'https://team.rzd.ru/',
-        ])
-        ->get($baseUrl, [
-            'page'     => 1,
-            'per_page' => 1,
-            'query'    => 'п',
-            'sort'     => 'date_desc',
-        ]);
-
-        if (!$resp1->ok()) {
-            $this->error('Ошибка первичного запроса: HTTP ' . $resp1->status());
+        $countResponse = $this->sendVacancyRequest(1, 1);
+        if (!$countResponse->ok()) {
+            $this->error('Ошибка первичного запроса: HTTP ' . $countResponse->status());
             return self::FAILURE;
         }
 
-        $json1 = $resp1->json();
-        $count = $json1['meta']['count'] ?? null;
-
+        $meta = $countResponse->json()['meta'] ?? null;
+        $count = $meta['count'] ?? null;
         if (!$count || !is_numeric($count)) {
             $this->error('Не удалось получить meta.count');
             return self::FAILURE;
         }
 
         $this->info("Всего вакансий: {$count}");
-
-        // 2 — запрос всех вакансий
         $this->info('Запрашиваю полный список...');
-        $resp2 = Http::withHeaders([
-            'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Accept'     => 'application/json, text/plain, */*',
-            'Origin'     => 'https://team.rzd.ru',
-            'Referer'    => 'https://team.rzd.ru/',
-        ])
-        ->get($baseUrl, [
-            'page'     => 1,
-            'per_page' => $count,
-            'query'    => 'п',
-            'sort'     => 'date_desc',
-        ]);
 
-        if (!$resp2->ok()) {
-            $this->error('Ошибка запроса вакансий: HTTP ' . $resp2->status());
+        $fullResponse = $this->sendVacancyRequest(1, $count);
+        if (!$fullResponse->ok()) {
+            $this->error('Ошибка запроса вакансий: HTTP ' . $fullResponse->status());
             return self::FAILURE;
         }
 
-        $json2 = $resp2->json();
-        $items = $json2['data'] ?? [];
-
+        $items = $fullResponse->json()['data'] ?? [];
         if (empty($items)) {
             $this->warn('Вакансии не найдены.');
             return self::SUCCESS;
         }
 
-        // Нормализуем строки
-        $normalized = [];
-        foreach ($items as $item) {
-            $normalized[] = $this->normalizeRow($item);
-        }
+        $normalized = array_map([$this, 'normalizeRow'], $items);
+        $this->attachDetailsByTitle($normalized);
 
-        // Подготовка Excel
-        $keys    = array_keys(self::COLUMN_SCHEMA);
-        $headers = array_values(self::COLUMN_SCHEMA);
-
-        $spreadsheet = new Spreadsheet();
-        $sheet       = $spreadsheet->getActiveSheet();
-        $sheet->setTitle('Vacancies');
-
-        // Заголовки
-        $col = 1;
-        foreach ($headers as $h) {
-            $cell = Coordinate::stringFromColumnIndex($col) . '1';
-            $sheet->setCellValue($cell, $h);
-            $col++;
-        }
-
-        // Строки
-        $rowIdx = 2;
-        foreach ($normalized as $row) {
-            $col = 1;
-            foreach ($keys as $key) {
-                $cell = Coordinate::stringFromColumnIndex($col) . $rowIdx;
-                $sheet->setCellValue($cell, $row[$key] ?? null);
-                $col++;
-            }
-            $rowIdx++;
-        }
-
-        // Автоширина колонок
-        foreach (range(1, count($headers)) as $c) {
-            $sheet->getColumnDimensionByColumn($c)->setAutoSize(true);
-        }
-
+        $payload = $this->buildPayload($normalized);
         $outPath = storage_path('app/' . $outFileName);
-        (new Xlsx($spreadsheet))->save($outPath);
+        file_put_contents($outPath, json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
 
-        $this->info("Готово: {$outPath}");
+        $this->info("Массив сформирован: {$outPath}");
         return self::SUCCESS;
+    }
+
+    private function sendVacancyRequest(int $page, int $perPage)
+    {
+        return Http::withHeaders([
+            'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
+            'Accept'     => 'application/json, text/plain, */*',
+            'Origin'     => 'https://team.rzd.ru',
+            'Referer'    => 'https://team.rzd.ru/',
+        ])->get(self::BASE_URL, [
+            'page'     => $page,
+            'per_page' => $perPage,
+            'sort'     => 'date_desc',
+        ]);
     }
 
     private function normalizeRow(array $item): array
@@ -146,6 +94,7 @@ class CollectVacancies extends Command
         return [
             'id'              => $item['id'] ?? null,
             'position_id'     => $item['position_id'] ?? null,
+            'position_title'  => $item['position_title'] ?? null,
             'salary_from'     => $item['salary_from'] ?? null,
             'salary_to'       => $item['salary_to'] ?? null,
             'salary_month'    => $item['salary_month'] ?? null,
@@ -158,7 +107,280 @@ class CollectVacancies extends Command
             'locality_name'   => $item['locality_name'] ?? null,
             'direction_title' => $item['direction_title'] ?? null,
             'speciality_title'=> $item['speciality_title'] ?? null,
-            'url' => 'team.rzd.ru/career/vacancies/' . $item['id']
+            'latitude'        => $item['latitude'] ?? null,
+            'longitude'       => $item['longitude'] ?? null,
+            'url'             => 'https://team.rzd.ru/career/vacancies/' . ($item['id'] ?? ''),
         ];
+    }
+
+    private function attachDetailsByTitle(array &$rows): void
+    {
+        foreach ($rows as $index => $row) {
+            $title = $row['position_title'];
+            if ($title && isset($this->detailByTitle[$title])) {
+                $rows[$index]['detail'] = $this->detailByTitle[$title];
+                continue;
+            }
+
+            $detail = $this->fetchVacancyDetail((int)$row['id']);
+            if ($title) {
+                $this->detailByTitle[$title] = $detail;
+            }
+            $rows[$index]['detail'] = $detail;
+        }
+    }
+
+    private function fetchVacancyDetail(int $id): array
+    {
+        if ($id === 0) {
+            return [];
+        }
+
+        if (isset($this->detailCache[$id])) {
+            return $this->detailCache[$id];
+        }
+
+        $response = Http::withHeaders([
+            'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
+            'Accept'     => 'application/json, text/plain, */*',
+            'Origin'     => 'https://team.rzd.ru',
+            'Referer'    => 'https://team.rzd.ru/',
+        ])->get(self::BASE_URL . '/' . $id);
+
+        return $this->detailCache[$id] = $response->ok() ? $response->json() : [];
+    }
+
+    private function buildPayload(array $rows): array
+    {
+        return [
+            'source' => [
+                'creation-time' => $this->formatCreationTime(),
+                'host' => self::HOST,
+                'vacancies' => array_map([$this, 'mapToVacancyRecord'], $rows),
+            ],
+        ];
+    }
+
+    private function mapToVacancyRecord(array $row): array
+    {
+        $detail = $row['detail'] ?? [];
+        $salary = $this->formatSalary($row);
+
+        return array_filter([
+            'url' => $row['url'],
+            'mobile-url' => $row['url'],
+            'creation-date' => $this->formatDate($detail['createdAt'] ?? $row['published_at']),
+            'update-date' => $this->formatDate($detail['updatedAt'] ?? $row['published_at']),
+            'salary' => $salary,
+            'currency' => $salary ? 'RUR' : null,
+            'category' => $this->buildCategories($row),
+            'job-name' => $row['position_title'],
+            'employment' => $this->mapEmployment($row['employment_type']),
+            'schedule' => $this->mapSchedule($row['schedule']),
+            'description' => $this->composeDescription($detail),
+            'duty' => $this->escapeForXml($detail['responsibilities'] ?? null),
+            'term' => $this->buildTerm($detail),
+            'requirement' => $this->buildRequirement($row, $detail),
+            'address' => $this->buildAddress($row, $detail),
+            'company' => $this->buildCompany($detail),
+            'campaign' => $this->composeCampaign($detail),
+        ]);
+    }
+
+    private function formatCreationTime(): string
+    {
+        $now = Carbon::now(self::TIMEZONE);
+        return $now->format('Y-m-d H:i:s') . ' GMT' . $this->formatOffset($now);
+    }
+
+    private function formatDate(?string $value): ?string
+    {
+        if (!$value) {
+            return null;
+        }
+
+        try {
+            $date = Carbon::parse($value)->setTimezone(self::TIMEZONE);
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        return $date->format('Y-m-d H:i:s') . ' GMT' . $this->formatOffset($date);
+    }
+
+    private function formatOffset(Carbon $date): string
+    {
+        $offsetMinutes = $date->offsetMinutes;
+        $sign = $offsetMinutes >= 0 ? '+' : '-';
+        $absMinutes = abs($offsetMinutes);
+        $hours = intdiv($absMinutes, 60);
+        $minutes = $absMinutes % 60;
+
+        $result = $sign . $hours;
+        if ($minutes) {
+            $result .= ':' . str_pad($minutes, 2, '0', STR_PAD_LEFT);
+        }
+
+        return $result;
+    }
+
+    private function formatSalary(array $row): ?string
+    {
+        $from = $row['salary_from'];
+        $to = $row['salary_to'];
+
+        if ($from && $to) {
+            return "от {$from} до {$to}";
+        }
+
+        if ($from) {
+            return "от {$from}";
+        }
+
+        if ($to) {
+            return "до {$to}";
+        }
+
+        return $row['salary_month'] ? "≈{$row['salary_month']}" : null;
+    }
+
+    private function buildCategories(array $row): array
+    {
+        $categories = [];
+        $industry = $row['direction_title'];
+        $specialization = $row['speciality_title'];
+
+        if ($industry || $specialization) {
+            $category = [];
+            if ($industry) {
+                $category['industry'] = $industry;
+            }
+            if ($specialization) {
+                $category['specialization'] = $specialization;
+            }
+            $categories[] = $category;
+        }
+
+        return $categories;
+    }
+
+    private function mapEmployment(?string $value): ?string
+    {
+        return self::EMPLOYMENT_LABELS[$value] ?? null;
+    }
+
+    private function mapSchedule(?string $value): ?string
+    {
+        return self::SCHEDULE_LABELS[$value] ?? null;
+    }
+
+    private function composeDescription(array $detail): ?string
+    {
+        $parts = [];
+        foreach (['description', 'requirements', 'responsibilities', 'package'] as $field) {
+            if (!empty($detail[$field])) {
+                $parts[] = $this->escapeForXml($detail[$field]);
+            }
+        }
+
+        return $parts ? implode("\n", array_unique($parts)) : null;
+    }
+
+    private function buildTerm(array $detail): array
+    {
+        return array_filter([
+            'contract' => null,
+            'text' => $this->escapeForXml($detail['package'] ?? null),
+        ]);
+    }
+
+    private function buildRequirement(array $row, array $detail): array
+    {
+        $experience = $this->mapExperience($row['experience']);
+
+        return array_filter([
+            'age' => null,
+            'sex' => null,
+            'education' => null,
+            'experience' => $experience,
+            'qualification' => $this->escapeForXml($detail['requirements'] ?? null),
+        ]);
+    }
+
+    private function mapExperience(?string $value): ?string
+    {
+        if (!$value) {
+            return null;
+        }
+
+        $map = [
+            'norequired' => 'Не требуется',
+            'short' => 'до 1 года',
+            'mid' => '1-3 года',
+            'long' => '3 и более',
+        ];
+
+        return $map[$value] ?? $value;
+    }
+
+    private function buildAddress(array $row, array $detail): array
+    {
+        $location = $detail['address'] ?? $row['locality_name'];
+
+        return array_filter([
+            'location' => $this->escapeForXml($location),
+            'metro' => null,
+            'lng' => $row['longitude'],
+            'lat' => $row['latitude'],
+        ]);
+    }
+
+    private function buildCompany(array $detail): array
+    {
+        if (empty($detail['company']) && empty($detail['organization'])) {
+            return [];
+        }
+
+        $company = $detail['company'] ?? $detail['organization'] ?? [];
+
+        return array_filter([
+            'name' => $company['name'] ?? null,
+            'description' => $this->escapeForXml($company['description'] ?? null),
+            'logo' => $company['logo'] ?? null,
+            'site' => $company['site'] ?? null,
+            'email' => $company['email'] ?? null,
+            'phone' => $company['phone'] ?? null,
+            'fax' => $company['fax'] ?? null,
+            'hr-agency' => 'false',
+            'contact-name' => $company['contactName'] ?? null,
+        ]);
+    }
+
+    private function composeCampaign(array $detail): ?string
+    {
+        $companyName = $detail['company']['name'] ?? 'РЖД';
+        $externalId = $detail['externalId'] ?? null;
+
+        if ($externalId) {
+            return trim($companyName . ' ' . $externalId);
+        }
+
+        return $companyName;
+    }
+
+    private function escapeForXml(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $text = strip_tags(html_entity_decode($value, ENT_QUOTES | ENT_XML1, 'UTF-8'));
+        $text = preg_replace('/\s+/', ' ', $text);
+
+        return str_replace(
+            ['"', '&', '>', '<', '\''],
+            ['&quot;', '&amp;', '&gt;', '&lt;', '&apos;'],
+            $text
+        );
     }
 }
