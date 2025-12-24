@@ -2,14 +2,15 @@
 
 namespace App\Console\Commands\RZHD;
 
+use App\Services\YandexFeedXmlFormat;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 
 class CollectVacancies extends Command
 {
-    protected $signature = 'rzhd:collect-vacancies {--outfile=rzhd_vacancies : Базовое имя json-файла в storage/app}';
-    protected $description = 'Собирает вакансии с team.rzd.ru и формирует массив по спецификации YVL';
+    protected $signature = 'rzhd:collect-vacancies {--outfile=rzhd_vacancies : Базовое имя xml-файла в storage/app}';
+    protected $description = 'Собирает вакансии с team.rzd.ru и генерирует YVL-совместимый XML через сервис';
 
     private const BASE_URL = 'https://team.rzd.ru/api/v1/career/vacancies';
     private const HOST = 'team.rzd.ru';
@@ -30,10 +31,18 @@ class CollectVacancies extends Command
 
     private array $detailCache = [];
     private array $detailByTitle = [];
+    private YandexFeedXmlFormat $xmlFormatter;
+
+    public function __construct(YandexFeedXmlFormat $xmlFormatter)
+    {
+        parent::__construct();
+
+        $this->xmlFormatter = $xmlFormatter;
+    }
 
     public function handle(): int
     {
-        $outFileName = (string)$this->option('outfile') . today() . '.json';
+        $outFileName = (string)$this->option('outfile') . today() . '.xml';
 
         $this->info('Запрос для получения общего количества вакансий...');
         $countResponse = $this->sendVacancyRequest(1, 1);
@@ -61,17 +70,17 @@ class CollectVacancies extends Command
         $items = $fullResponse->json()['data'] ?? [];
         if (empty($items)) {
             $this->warn('Вакансии не найдены.');
-            return self::SUCCESS;
+            return self::FAILURE;
         }
 
         $normalized = array_map([$this, 'normalizeRow'], $items);
         $this->attachDetailsByTitle($normalized);
 
-        $payload = $this->buildPayload($normalized);
+        $entities = array_filter(array_map([$this, 'mapToEntity'], $normalized));
         $outPath = storage_path('app/' . $outFileName);
-        file_put_contents($outPath, json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+        $this->xmlFormatter->createXmlFeed($entities, self::HOST, $outPath);
 
-        $this->info("Массив сформирован: {$outPath}");
+        $this->info("XML сформирован: {$outPath}");
         return self::SUCCESS;
     }
 
@@ -150,47 +159,115 @@ class CollectVacancies extends Command
         return $this->detailCache[$id] = $response->ok() ? $response->json() : [];
     }
 
-    private function buildPayload(array $rows): array
-    {
-        return [
-            'source' => [
-                'creation-time' => $this->formatCreationTime(),
-                'host' => self::HOST,
-                'vacancies' => array_map([$this, 'mapToVacancyRecord'], $rows),
-            ],
-        ];
-    }
-
-    private function mapToVacancyRecord(array $row): array
+    private function mapToEntity(array $row): array
     {
         $detail = $row['detail'] ?? [];
         $salary = $this->formatSalary($row);
+        $company = $this->buildCompanyFields($detail);
+        $addresses = $this->buildAddresses($row, $detail);
+        $category = $this->buildCategory($row);
 
-        return array_filter([
+        $entity = [
             'url' => $row['url'],
-            'mobile-url' => $row['url'],
-            'creation-date' => $this->formatDate($detail['createdAt'] ?? $row['published_at']),
-            'update-date' => $this->formatDate($detail['updatedAt'] ?? $row['published_at']),
+            'mobile_url' => $row['url'],
+            'creation_date' => $this->formatDate($detail['createdAt'] ?? $row['published_at']),
+            'update_date' => $this->formatDate($detail['updatedAt'] ?? $row['published_at']),
             'salary' => $salary,
             'currency' => $salary ? 'RUR' : null,
-            'category' => $this->buildCategories($row),
-            'job-name' => $row['position_title'],
+            'category' => $category,
+            'job_name' => $row['position_title'],
             'employment' => $this->mapEmployment($row['employment_type']),
             'schedule' => $this->mapSchedule($row['schedule']),
             'description' => $this->composeDescription($detail),
             'duty' => $this->escapeForXml($detail['responsibilities'] ?? null),
             'term' => $this->buildTerm($detail),
             'requirement' => $this->buildRequirement($row, $detail),
-            'address' => $this->buildAddress($row, $detail),
-            'company' => $this->buildCompany($detail),
+            'company_name' => $company['name'],
+            'company_description' => $this->escapeForXml($company['description']),
+            'company_logo' => $company['logo'],
+            'company_site' => $company['site'],
+            'company_email' => $company['email'],
+            'company_phone' => $company['phone'],
+            'company_fax' => $company['fax'],
+            'hr_agency' => false,
+            'contact_name' => $company['contact_name'],
             'campaign' => $this->composeCampaign($detail),
-        ]);
+        ];
+
+        if ($addresses) {
+            $entity['addresses'] = $addresses;
+        }
+
+        return array_filter($entity, function ($value) {
+            if ($value === null || $value === '') {
+                return false;
+            }
+
+            if (is_array($value) && empty($value)) {
+                return false;
+            }
+
+            return true;
+        });
     }
 
-    private function formatCreationTime(): string
+    private function buildCategory(array $row): array
     {
-        $now = Carbon::now(self::TIMEZONE);
-        return $now->format('Y-m-d H:i:s') . ' GMT' . $this->formatOffset($now);
+        $category = [];
+        $industry = $row['direction_title'];
+        $specialization = $row['speciality_title'];
+
+        if ($industry) {
+            $category['industry'] = $industry;
+        }
+
+        if ($specialization) {
+            $category['specialization'] = $specialization;
+        }
+
+        return $category;
+    }
+
+    private function buildAddresses(array $row, array $detail): array
+    {
+        $location = $detail['address'] ?? $row['locality_name'];
+        $address = array_filter([
+            'location' => $this->escapeForXml($location),
+            'metro' => null,
+            'lng' => $row['longitude'],
+            'lat' => $row['latitude'],
+        ]);
+
+        return $address ? [$address] : [];
+    }
+
+    private function buildCompanyFields(array $detail): array
+    {
+        $company = $detail['company'] ?? $detail['organization'] ?? [];
+
+        return [
+            'name' => $company['name'] ?? 'РЖД',
+            'description' => $company['description'] ?? null,
+            'logo' => $company['logo'] ?? null,
+            'site' => $company['site'] ?? null,
+            'email' => $company['email'] ?? null,
+            'phone' => $company['phone'] ?? null,
+            'fax' => $company['fax'] ?? null,
+            'contact_name' => $company['contactName'] ?? null,
+        ];
+    }
+
+    private function composeCampaign(array $detail): ?string
+    {
+        $company = $detail['company'] ?? $detail['organization'] ?? [];
+        $companyName = $company['name'] ?? 'РЖД';
+        $externalId = $detail['externalId'] ?? null;
+
+        if ($externalId) {
+            return trim($companyName . ' ' . $externalId);
+        }
+
+        return $companyName;
     }
 
     private function formatDate(?string $value): ?string
@@ -242,26 +319,6 @@ class CollectVacancies extends Command
         }
 
         return $row['salary_month'] ? "≈{$row['salary_month']}" : null;
-    }
-
-    private function buildCategories(array $row): array
-    {
-        $categories = [];
-        $industry = $row['direction_title'];
-        $specialization = $row['speciality_title'];
-
-        if ($industry || $specialization) {
-            $category = [];
-            if ($industry) {
-                $category['industry'] = $industry;
-            }
-            if ($specialization) {
-                $category['specialization'] = $specialization;
-            }
-            $categories[] = $category;
-        }
-
-        return $categories;
     }
 
     private function mapEmployment(?string $value): ?string
@@ -321,51 +378,6 @@ class CollectVacancies extends Command
         ];
 
         return $map[$value] ?? $value;
-    }
-
-    private function buildAddress(array $row, array $detail): array
-    {
-        $location = $detail['address'] ?? $row['locality_name'];
-
-        return array_filter([
-            'location' => $this->escapeForXml($location),
-            'metro' => null,
-            'lng' => $row['longitude'],
-            'lat' => $row['latitude'],
-        ]);
-    }
-
-    private function buildCompany(array $detail): array
-    {
-        if (empty($detail['company']) && empty($detail['organization'])) {
-            return [];
-        }
-
-        $company = $detail['company'] ?? $detail['organization'] ?? [];
-
-        return array_filter([
-            'name' => $company['name'] ?? null,
-            'description' => $this->escapeForXml($company['description'] ?? null),
-            'logo' => $company['logo'] ?? null,
-            'site' => $company['site'] ?? null,
-            'email' => $company['email'] ?? null,
-            'phone' => $company['phone'] ?? null,
-            'fax' => $company['fax'] ?? null,
-            'hr-agency' => 'false',
-            'contact-name' => $company['contactName'] ?? null,
-        ]);
-    }
-
-    private function composeCampaign(array $detail): ?string
-    {
-        $companyName = $detail['company']['name'] ?? 'РЖД';
-        $externalId = $detail['externalId'] ?? null;
-
-        if ($externalId) {
-            return trim($companyName . ' ' . $externalId);
-        }
-
-        return $companyName;
     }
 
     private function escapeForXml(?string $value): ?string
