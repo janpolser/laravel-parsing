@@ -11,7 +11,7 @@ class PrepareDataToFormat extends Command
 {
     protected $signature = 'vacancies:prepare-data-to-format
                            {input=storage/app/vacancies.json : Path to input JSON file}
-                           {output=storage/app/vacancies.xml : Path to output XML file}';
+                           {output=storage/app/public/yandex/vacancies.xml : Path to output XML file}';
 
     protected $description = 'Convert vacancies from JSON to XML format';
 
@@ -32,9 +32,10 @@ class PrepareDataToFormat extends Command
         $this->comment('🔍 Проверка существования входного файла...');
         if (!file_exists($inputPath)) {
             $this->error("❌ Файл не найден: {$inputPath}");
+
             return 1;
         }
-        $this->info("✅ Файл найден");
+        $this->info('✅ Файл найден');
         $this->line('');
 
         // Чтение JSON
@@ -47,6 +48,7 @@ class PrepareDataToFormat extends Command
 
         if (json_last_error() !== JSON_ERROR_NONE) {
             $this->error('❌ Неверный JSON: ' . json_last_error_msg());
+
             return 1;
         }
         $this->info('✅ JSON валиден');
@@ -55,31 +57,47 @@ class PrepareDataToFormat extends Command
         $this->info("📊 Найдено направлений: {$totalDirections}");
         $this->line('');
 
+        // Собираем все вакансии из всех направлений в один массив
+        $this->comment('🔍 Сбор вакансий из всех направлений...');
+        $allVacancies = [];
         $directionCounter = 0;
+        $totalVacancies = 0;
+
         foreach ($vacanciesData as $directionName => $direction) {
             $directionCounter++;
-            $this->info("🔹 Обработка направления {$directionCounter}/{$totalDirections}: {$directionName}");
-
             $vacancyCount = count($direction['vacancies'] ?? []);
-            $this->comment("   Найдено вакансий: {$vacancyCount}");
+            $totalVacancies += $vacancyCount;
 
-            // Подготовка данных
-            $this->comment('   🛠️  Подготовка данных вакансий...');
-            $startTime = microtime(true);
+            $this->info("📌 Направление {$directionCounter}: {$directionName} - {$vacancyCount} вакансий");
 
-            $vacancies = $this->prepareData($direction['vacancies'], $solver);
-
-            $endTime = microtime(true);
-            $processingTime = round($endTime - $startTime, 2);
-            $this->info("   ✅ Данные подготовлены ({$processingTime} сек.)");
-
-            // Создание XML
-            $this->comment('   📝 Создание XML фида...');
-            $xml->createXmlFeed($vacancies, 'crowd.yandex.ru', $outputPath, $directionCounter === 1);
-            $this->info("   ✅ XML фид обновлен");
-
-            $this->line('');
+            // Добавляем вакансии текущего направления в общий массив
+            if (!empty($direction['vacancies'])) {
+                $allVacancies = array_merge($allVacancies, $direction['vacancies']);
+            }
         }
+
+        $this->info("📊 Всего вакансий собрано: {$totalVacancies}");
+        $this->line('');
+
+        // Подготовка данных
+        $this->comment('🛠️  Подготовка данных вакансий...');
+        $startTime = microtime(true);
+
+        $preparedVacancies = $this->prepareData($allVacancies, $solver);
+
+        $endTime = microtime(true);
+        $processingTime = round($endTime - $startTime, 2);
+        $this->info("✅ Данные подготовлены ({$processingTime} сек.)");
+
+        // Создание XML
+        $this->comment('📝 Создание XML фида...');
+        $xmlCreationStart = microtime(true);
+
+        $xml->createXmlFeed($preparedVacancies, 'crowd.yandex.ru', 'storage/app/public/yandex/YandexVacancies' . today() . '.xml');
+
+        $xmlCreationEnd = microtime(true);
+        $xmlCreationTime = round($xmlCreationEnd - $xmlCreationStart, 2);
+        $this->info("✅ XML фид создан ({$xmlCreationTime} сек.)");
 
         $this->info('🎉 Все направления успешно обработаны!');
         $this->info("📄 XML файл сохранен: {$outputPath}");
@@ -98,6 +116,8 @@ class PrepareDataToFormat extends Command
         $availableCount = 0;
         $processedCount = 0;
 
+        $this->comment("📊 Анализ доступных вакансий...");
+
         // Считаем доступные вакансии
         foreach ($vacanciesData as $vacancy) {
             if ($vacancy['available']) {
@@ -105,10 +125,18 @@ class PrepareDataToFormat extends Command
             }
         }
 
-        $this->line("   Доступно вакансий для обработки: {$availableCount}/{$total}");
+        $this->info("Доступно вакансий для обработки: {$availableCount}/{$total}");
+        $this->line('');
+
+        if ($availableCount === 0) {
+            $this->warn('⚠️  Нет доступных вакансий для обработки');
+            return [];
+        }
+
+        $this->comment('🔄 Начинаю обработку вакансий...');
 
         $progressBar = $this->output->createProgressBar($availableCount);
-        $progressBar->setFormat('debug');
+        $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s%');
         $progressBar->start();
 
         foreach ($vacanciesData as $index => $vacancy) {
@@ -116,11 +144,16 @@ class PrepareDataToFormat extends Command
                 $processedCount++;
                 $currentNumber = $processedCount;
 
-                // Обновляем прогресс каждые 10 вакансий или для первых/последних
-                if ($currentNumber <= 3 || $currentNumber >= $availableCount - 2 || $currentNumber % 10 === 0) {
-                    $progressBar->clear();
-                    $this->line("   ⏳ Обработка вакансии {$currentNumber}/{$availableCount}: {$vacancy['title']}");
-                    $progressBar->display();
+                // Показываем информацию о первых 3 вакансиях
+                if ($currentNumber <= 3) {
+                    $this->line('');
+                    $this->info("🔹 Вакансия #{$currentNumber}: {$vacancy['title']}");
+                    $this->line("   📍 URL: {$vacancy['url']}");
+                    $this->line("   💰 Оплата: {$vacancy['payment']}");
+
+                    if ($currentNumber === 1) {
+                        $this->comment('   ⏳ Получаю описание...');
+                    }
                 }
 
                 $editedVacancy = [];
@@ -135,13 +168,11 @@ class PrepareDataToFormat extends Command
                 $editedVacancy['schedule'] = ($vacancy['tags']['remotely'] ?? '') === 'локально' ? 'полный день' : 'удаленная работа';
 
                 // Получение описания
-                if ($currentNumber <= 3 || $currentNumber >= $availableCount - 2) {
-                    $this->line("   🔗 Получение описания для: {$vacancy['url']}");
-                }
-
-                $description = $this->getDescriptionFromUrl($vacancy['url'], $solver, $currentNumber, $availableCount);
+                $description = $this->getDescriptionFromUrl($vacancy['url'], $solver, $currentNumber);
                 $description = $this->cleanupSpecialCharacters($description);
-                $editedVacancy['description'] = $description ?? $vacancy['description'];
+
+                // Используем описание из вакансии, если не удалось получить с сайта
+                $editedVacancy['description'] = !empty($description) ? $description : ($vacancy['description'] ?? '');
 
                 if (($vacancy['tags']['remotely'] ?? '') === 'удалённо') {
                     $editedVacancy['term']['text'] = $this->escapeForXml('удаленная работа');
@@ -154,13 +185,31 @@ class PrepareDataToFormat extends Command
                 $editedVacancy['hr_agency'] = 'false';
 
                 $vacancies[] = $editedVacancy;
+
+                // Показываем статус для первых 3 вакансий
+                if ($currentNumber <= 3) {
+                    $descLength = strlen($editedVacancy['description']);
+                    $this->info("   ✅ Готово (длина описания: {$descLength} символов)");
+                    $this->line('');
+                }
+
                 $progressBar->advance();
             }
         }
 
         $progressBar->finish();
-        $this->line("");
-        $this->info("   ✅ Обработано вакансий: {$processedCount}");
+        $this->line('');
+        $this->line('');
+        $this->info("✅ Обработано вакансий: {$processedCount} из {$availableCount} доступных");
+
+        if ($processedCount > 0) {
+            $avgDescLength = 0;
+            foreach ($vacancies as $v) {
+                $avgDescLength += strlen($v['description'] ?? '');
+            }
+            $avgDescLength = round($avgDescLength / $processedCount);
+            $this->info("📊 Средняя длина описания: {$avgDescLength} символов");
+        }
 
         return $vacancies;
     }
@@ -217,7 +266,7 @@ class PrepareDataToFormat extends Command
         return trim($text);
     }
 
-    private function getDescriptionFromUrl($url, $solver, $currentNumber = null, $totalNumber = null)
+    private function getDescriptionFromUrl($url, $solver, $currentNumber = null)
     {
         try {
             if ($currentNumber && $currentNumber <= 3) {
@@ -228,14 +277,14 @@ class PrepareDataToFormat extends Command
 
             if ($html === null) {
                 if ($currentNumber && $currentNumber <= 3) {
-                    $this->line("   ⚠️  Получен пустой ответ");
+                    $this->warn('   ⚠️  Получен пустой ответ от сервера');
                 }
                 return '';
             }
 
             if (str_contains($html, 'не робот')) {
                 if ($currentNumber && $currentNumber <= 3) {
-                    $this->line("   ⚠️  Обнаружена капча");
+                    $this->warn('   ⚠️  Обнаружена капча, пропускаю...');
                 }
                 return '';
             }
@@ -272,13 +321,17 @@ class PrepareDataToFormat extends Command
             }
 
             if ($currentNumber && $currentNumber <= 3) {
-                $this->line("   📊 Найдено секций: {$foundSections}");
+                if ($foundSections > 0) {
+                    $this->info("   📊 Найдено секций: {$foundSections}");
+                } else {
+                    $this->warn('   ⚠️  Не найдено ни одной секции с описанием');
+                }
             }
 
             return implode('<br>', $sections);
         } catch (\Exception $e) {
             if ($currentNumber && $currentNumber <= 3) {
-                $this->line("   ❌ Ошибка: " . $e->getMessage());
+                $this->error('   ❌ Ошибка при получении описания: ' . $e->getMessage());
             }
             return '';
         }

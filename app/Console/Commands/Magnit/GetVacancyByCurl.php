@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Log;
 
 class GetVacancyByCurl extends Command
 {
-    protected $signature = 'app:get-vacancy-by-curl';
+    protected $signature = 'app:vacancy-magnit';
 
     protected $description = 'Парсинг вакансий Магнит с устойчивостью и потоковой записью';
 
