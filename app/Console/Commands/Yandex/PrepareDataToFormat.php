@@ -9,7 +9,7 @@ use Illuminate\Console\Command;
 
 class PrepareDataToFormat extends Command
 {
-    protected $signature = 'vacancies:prepare-data-to-format
+    protected $signature = 'yandex:prepare-data-to-format
                            {input=storage/app/vacancies.json : Path to input JSON file}
                            {output=storage/app/public/yandex/vacancies.xml : Path to output XML file}';
 

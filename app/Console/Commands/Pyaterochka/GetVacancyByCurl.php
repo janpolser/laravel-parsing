@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Http;
 
 class GetVacancyByCurl extends Command
 {
-    protected $signature = 'app:vacancy-5ka';
+    protected $signature = 'pyaterochka:vacancy-5ka';
 
     protected $description = 'Command description';
 

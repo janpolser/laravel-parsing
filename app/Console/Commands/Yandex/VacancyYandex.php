@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Http;
 
 class VacancyYandex extends Command
 {
-    protected $signature = 'app:vacancy-yandex';
+    protected $signature = 'yandex:vacancy-yandex';
 
     protected $description = 'Command description';
 

@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Log;
 
 class CollectVacancy extends Command
 {
-    protected $signature = 'app:collect-vacancy-magnit';
+    protected $signature = 'magnit:collect-vacancy-magnit';
 
     protected $description = 'Парсинг вакансий Магнит с устойчивостью и потоковой записью';
 
