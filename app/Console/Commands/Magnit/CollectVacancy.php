@@ -2,7 +2,6 @@
 
 namespace App\Console\Commands\Magnit;
 
-use App\Services\YandexFeedXmlFormat;
 use DateTime;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
@@ -14,9 +13,16 @@ class CollectVacancy extends Command
 
     protected $description = 'Парсинг вакансий Магнит с устойчивостью и потоковой записью';
 
-    public function handle(YandexFeedXmlFormat $xml)
+    public function handle()
     {
         $this->info('Начало сбора вакансий Магнит...');
+
+        $filePath = 'storage/app/public/magnit/MagnitVacancies' . today() . '.xml';
+        $dir = dirname($filePath);
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+        $writer = $this->initXmlWriter($filePath, 'https://rabota.magnit.ru');
 
         // Запрос локаций
         $this->info('Получение списка локаций...');
@@ -33,9 +39,9 @@ class CollectVacancy extends Command
         date_default_timezone_set('Europe/Moscow');
         $date = new DateTime;
 
-        $editedVacancies = [];
         $totalLocations = count($locations);
         $processedLocations = 0;
+        $totalVacancies = 0;
 
         // Прогресс-бар для обработки локаций
         $locationsProgressBar = $this->output->createProgressBar($totalLocations);
@@ -92,8 +98,9 @@ class CollectVacancy extends Command
                         $editedVacancy['company_name'] = 'Магнит';
                         $editedVacancy['hr_agency'] = 'false';
 
-                        $editedVacancies[] = $editedVacancy;
+                        $this->writeVacancyXml($writer, $editedVacancy);
                         $vacanciesInLocation++;
+                        $totalVacancies++;
                     }
                 }
 
@@ -125,7 +132,7 @@ class CollectVacancy extends Command
 
             // Обновляем основной прогресс-бар
             $processedLocations++;
-            $locationsProgressBar->setMessage("Обработано вакансий: " . count($editedVacancies));
+            $locationsProgressBar->setMessage("Обработано вакансий: " . $totalVacancies);
             $locationsProgressBar->advance();
         }
 
@@ -133,15 +140,128 @@ class CollectVacancy extends Command
         $locationsProgressBar->clear();
 
         $this->info(PHP_EOL . 'Обработка локаций завершена.');
-        $this->info('Всего собрано вакансий: ' . count($editedVacancies));
+        $this->info('Всего собрано вакансий: ' . $totalVacancies);
 
-        // Создание XML
-        $this->info('Создание XML файла...');
-        $xml->createXmlFeed($editedVacancies, 'https://rabota.magnit.ru', 'storage/app/public/magnit/MagnitVacancies' . today() . '.xml');
-
-        $this->info('Готово! XML файл сохранен: storage/app/public/magnit/vacancies.xml');
+        $this->finishXmlWriter($writer);
+        $this->info('Готово! XML файл сохранен: ' . $filePath);
 
         return 0;
+    }
+
+    private function initXmlWriter(string $filePath, string $hostName): \XMLWriter
+    {
+        $writer = new \XMLWriter();
+        $writer->openURI($filePath);
+        $writer->startDocument('1.0', 'utf-8');
+        $writer->startElement('source');
+        $writer->writeAttribute('creation-time', (new DateTime)->format('Y-m-d H:i:s') . ' GMT+3');
+        $writer->writeAttribute('host', $hostName);
+        $writer->startElement('vacancies');
+
+        return $writer;
+    }
+
+    private function finishXmlWriter(\XMLWriter $writer): void
+    {
+        $writer->endElement(); // vacancies
+        $writer->endElement(); // source
+        $writer->endDocument();
+        $writer->flush();
+    }
+
+    private function writeVacancyXml(\XMLWriter $writer, array $v): void
+    {
+        $writer->startElement('vacancy');
+
+        $this->writeTextElement($writer, 'url', $v['url'] ?? null);
+        $this->writeTextElement($writer, 'mobile-url', $v['mobile_url'] ?? null);
+        $this->writeTextElement($writer, 'creation-date', $v['creation_date'] ?? null);
+        $this->writeTextElement($writer, 'update-date', $v['update_date'] ?? null);
+
+        $this->writeTextElement($writer, 'salary', $v['salary'] ?? null);
+        $this->writeTextElement($writer, 'currency', $v['currency'] ?? null);
+
+        if (!empty($v['category'])) {
+            $writer->startElement('category');
+            $this->writeTextElement($writer, 'industry', $v['category']['industry'] ?? null);
+            $this->writeTextElement($writer, 'specialization', $v['category']['specialization'] ?? null);
+            $writer->endElement();
+        }
+
+        $this->writeTextElement($writer, 'job-name', $v['job_name'] ?? null);
+        $this->writeTextElement($writer, 'employment', $v['employment'] ?? null);
+        $this->writeTextElement($writer, 'schedule', $v['schedule'] ?? null);
+        $this->writeTextElement($writer, 'description', $v['description'] ?? null);
+        $this->writeTextElement($writer, 'duty', $v['duty'] ?? null);
+
+        if (!empty($v['term'])) {
+            $writer->startElement('term');
+            $this->writeTextElement($writer, 'contract', $v['term']['contract'] ?? null);
+            $this->writeTextElement($writer, 'text', $v['term']['text'] ?? null);
+            $writer->endElement();
+        }
+
+        if (!empty($v['requirement'])) {
+            $writer->startElement('requirement');
+            $this->writeTextElement($writer, 'age', $v['requirement']['age'] ?? null);
+            $this->writeTextElement($writer, 'sex', $v['requirement']['sex'] ?? null);
+            $this->writeTextElement($writer, 'education', $v['requirement']['education'] ?? null);
+            $this->writeTextElement($writer, 'experience', $v['requirement']['experience'] ?? null);
+            $this->writeTextElement($writer, 'qualification', $v['requirement']['qualification'] ?? null);
+            $writer->endElement();
+        }
+
+        if (!empty($v['addresses'])) {
+            $writer->startElement('addresses');
+            $addresses = $v['addresses'];
+            if (isset($addresses['address'])) {
+                $addresses = [$addresses['address']];
+            }
+            foreach ($addresses as $addrData) {
+                $writer->startElement('address');
+                $this->writeTextElement($writer, 'location', $addrData['location'] ?? null);
+                if (!empty($addrData['metro'])) {
+                    foreach ((array) $addrData['metro'] as $m) {
+                        $this->writeTextElement($writer, 'metro', $m);
+                    }
+                }
+                $this->writeTextElement($writer, 'lng', $addrData['lng'] ?? null);
+                $this->writeTextElement($writer, 'lat', $addrData['lat'] ?? null);
+                $writer->endElement();
+            }
+            $writer->endElement();
+        }
+
+        $writer->startElement('company');
+        $this->writeTextElement($writer, 'name', $v['company_name'] ?? null);
+        $this->writeTextElement($writer, 'description', $v['company_description'] ?? null);
+        $this->writeTextElement($writer, 'logo', $v['company_logo'] ?? null);
+        $this->writeTextElement($writer, 'site', $v['company_site'] ?? null);
+        foreach (['email', 'phone', 'fax'] as $contactType) {
+            if (!empty($v["company_$contactType"])) {
+                foreach ((array) $v["company_$contactType"] as $val) {
+                    $this->writeTextElement($writer, $contactType, $val);
+                }
+            }
+        }
+        if (array_key_exists('hr_agency', $v)) {
+            $this->writeTextElement($writer, 'hr-agency', $v['hr_agency'] ? 'true' : 'false');
+        }
+        $this->writeTextElement($writer, 'contact-name', $v['contact_name'] ?? null);
+        $writer->endElement();
+
+        $this->writeTextElement($writer, 'campaign', $v['campaign'] ?? null);
+
+        $writer->endElement();
+    }
+
+    private function writeTextElement(\XMLWriter $writer, string $name, $value): void
+    {
+        if ($value !== null && $value !== '') {
+            $writer->startElement($name);
+            $writer->text((string) $value);
+            $writer->endElement();
+        }
     }
 
     private function safeRequest(string $url, int $attempts = 5, int $delaySeconds = 3)
