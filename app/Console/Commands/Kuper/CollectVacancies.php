@@ -14,7 +14,7 @@ class CollectVacancies extends Command
      *
      * @var string
      */
-     protected $signature = 'app:collect-vacancies
+     protected $signature = 'kuper:collect-vacancies
         {--outfile=kuper_vacancies : Базовое имя файлов в storage/app (без расширения)}';
 
     /**
@@ -285,7 +285,7 @@ class CollectVacancies extends Command
     private function extractCitiesFromChunk(string $chunk): ?array
     {
 
-        $pattern = "/(\w+)\s*=\s*JSON\.parse\s*\(\s*(?:'((?:\\\\.|[^\\\\'])*?)'|\"((?:\\\\.|[^\\\\\"])*?)\")\s*\)/s";
+        $pattern = '/(\w+)\s*=\s*JSON\.parse\s*\(\s*(["\'])(.*?)\2\s*\)/s';
         if (!preg_match_all($pattern, $chunk, $matches)) {
             return null;
         }
