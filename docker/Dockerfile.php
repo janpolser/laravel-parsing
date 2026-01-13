@@ -41,7 +41,7 @@ https://github.com/aptible/supercronic/releases/download/v0.2.29/supercronic-lin
 
 COPY docker/php/conf.d/ /usr/local/etc/php/conf.d/
 
-RUN echo "*/30 * * * * cd /var/www && php artisan schedule:run >> /proc/1/fd/1 2>/proc/1/fd/2" > /etc/crontab \
+RUN echo "0 * * * * cd /var/www && php artisan schedule:run >> /proc/1/fd/1 2>/proc/1/fd/2" > /etc/crontab \
 && chmod 0644 /etc/crontab
 
 WORKDIR /var/www
