@@ -20,6 +20,7 @@ class GetVacancyByCurl extends Command
         $timeout = 60;
 
         date_default_timezone_set('Europe/Moscow');
+        ini_set('memory_limit', '16384M');
         $date = new DateTime;
 
         try {
@@ -157,7 +158,7 @@ class GetVacancyByCurl extends Command
                 }
             }
 
-            $xml->createXmlFeed($editedVacancies, 'https://rabota5ka.ru/', 'storage/app/public/5ka/PyaterochkaVacancies' . today() . '.xml');
+            $xml->createXmlFeed($editedVacancies, 'https://rabota5ka.ru/', 'storage/app/public/5ka/' . today() . '.xml');
 
             $this->info("✅ Готово! Обработано вакансий: " . count($editedVacancies));
 

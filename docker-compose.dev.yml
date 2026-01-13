@@ -1,54 +1,31 @@
+version: '3.8'
+
 services:
-    app:
-        container_name: vacancies-parsing
-        env_file:
-          - .env
-        build:
-          context: .
-          dockerfile: ./docker/dev/Dockerfile.php
-        working_dir: /var/www
-        user: "1000:1000"
-        volumes:
-        - .:/var/www
-        - ./docker/common/php/www.conf:/usr/local/etc/php-fpm.d/www.conf
-        - ./docker/php/conf.d/xdebug.ini:/usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini
-        - ./docker/php/conf.d/error_reporting.ini:/usr/local/etc/php/conf.d/error_reporting.ini
-        restart: unless-stopped
-        environment:
-          PHP_IDE_CONFIG: ${PHP_IDE_CONFIG:-serverName=docker}
-          DB_HOST: postgres
-        networks:
-        - app-network
-        deploy:
-          resources:
-            limits:
-              cpus: '0.10'
-              memory: 700M
-    nginx:
-        container_name: kopiskidki-test-nginx
-        image: nginx:latest
-        working_dir: /var/www
-        volumes:
-        - .:/var/www
-        - ./docker/common/nginx/conf/dev.conf:/etc/nginx/conf.d/default.conf
-        - ./docker/common/nginx/logs:/var/log/nginx
-        - ./storage/app/public:/var/www/storage/app/public
-        - ./public:/var/www/public
-        ports:
-        - "127.0.0.1:8083:80"
-        depends_on:
-        - app
-        networks:
-        - app-network
-        restart: unless-stopped
-        deploy:
-          resources:
-            limits:
-              cpus: '0.05'
-              memory: 700M
+  app:
+    container_name: vacancies-parsing
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.php
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+      - ./docker/php/conf.d:/usr/local/etc/php/conf.d
+      - composer-cache:/tmp/composer-cache
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      APP_DEBUG: ${APP_DEBUG:-true}
+      TZ: ${TZ:-Europe/Moscow}
+      COMPOSER_CACHE_DIR: /tmp/composer-cache
+    stdin_open: true
+    tty: true
+    networks:
+      - app-network
+    restart: unless-stopped
+
 networks:
   app-network:
     driver: bridge
+
 volumes:
-  postgres_data:
+  composer-cache:
     driver: local

@@ -48,7 +48,7 @@ class GenerateCourierVacanciesWB extends Command
     public function handle(): int
     {
         $xmlOutFile = (string) $this->option('xml-outfile');
-        $xmlPath    = storage_path('app/' . $xmlOutFile . today()->toDateString() . '.xml');
+        $xmlPath    = storage_path('app/public/wb/' . $xmlOutFile . today()->toDateString() . '.xml');
 
         try {
             $this->info('Запрашиваю список городов из API...');

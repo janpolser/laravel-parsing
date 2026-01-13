@@ -58,7 +58,7 @@ TXT;
     public function handle(): int
     {
         $xmlOutFile = (string) $this->option('xml-outfile');
-        $xmlPath    = storage_path('app/' . $xmlOutFile . today()->toDateString() . '.xml');
+        $xmlPath    = storage_path('app/public/wb/' . $xmlOutFile . today()->toDateString() . '.xml');
 
         try {
             $this->info('Шаг 1: Ищем актуальный JS-файл...');

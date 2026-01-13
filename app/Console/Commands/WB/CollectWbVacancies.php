@@ -111,7 +111,7 @@ class CollectWbVacancies extends Command
 
         $entities = array_filter(array_map([$this, 'mapToEntity'], $normalizedRows));
 
-        $outPath = storage_path('app/' . $outFileName);
+        $outPath = storage_path('app/public/wb/' . $outFileName);
         $this->xmlFormatter->createXmlFeed($entities, self::HOST, $outPath);
 
         $this->info("XML сформирован: {$outPath}");

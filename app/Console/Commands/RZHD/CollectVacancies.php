@@ -77,7 +77,7 @@ class CollectVacancies extends Command
         $this->attachDetailsByTitle($normalized);
 
         $entities = array_filter(array_map([$this, 'mapToEntity'], $normalized));
-        $outPath = storage_path('app/' . $outFileName);
+        $outPath = storage_path('app/public/rzhd/' . $outFileName);
         $this->xmlFormatter->createXmlFeed($entities, self::HOST, $outPath);
 
         $this->info("XML сформирован: {$outPath}");
