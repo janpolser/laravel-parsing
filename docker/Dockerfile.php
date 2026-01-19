@@ -39,8 +39,6 @@ RUN curl -fsSL -o /usr/local/bin/supercronic \
 https://github.com/aptible/supercronic/releases/download/v0.2.29/supercronic-linux-amd64 \
 && chmod +x /usr/local/bin/supercronic
 
-COPY docker/php/conf.d/ /usr/local/etc/php/conf.d/
-
 RUN echo "0 * * * * cd /var/www && php artisan schedule:run >> /proc/1/fd/1 2>/proc/1/fd/2" > /etc/crontab \
 && chmod 0644 /etc/crontab
 
@@ -48,4 +46,3 @@ WORKDIR /var/www
 
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["supercronic", "/etc/crontab"]
-wb

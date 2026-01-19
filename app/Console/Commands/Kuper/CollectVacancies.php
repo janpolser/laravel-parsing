@@ -208,17 +208,20 @@ class CollectVacancies extends Command
             $cities = $this->loadCityEntries();
         } catch (\Throwable $e) {
             $this->error('Не удалось загрузить список городов: ' . $e->getMessage());
+
             return self::FAILURE;
         }
 
         if (empty($cities)) {
             $this->warn('Список городов пуст — файл не создан.');
+
             return self::SUCCESS;
         }
 
         $entities = $this->buildFeedEntities($cities);
         if (empty($entities)) {
             $this->warn('Не удалось сформировать сущности для XML.');
+
             return self::SUCCESS;
         }
 
@@ -274,6 +277,7 @@ class CollectVacancies extends Command
 
             if ($cities = $this->extractCitiesFromChunk($chunkResp->body())) {
                 $this->info("Список городов найден в {$url}");
+
                 return $cities;
             }
             $this->info("Не удалось распарсить список городов в {$url}");
@@ -301,6 +305,7 @@ class CollectVacancies extends Command
             }
             dump('error');
         }
+
         return null;
     }
 
@@ -433,6 +438,7 @@ class CollectVacancies extends Command
         if (is_array($value) && empty($value)) {
             return false;
         }
+
         return true;
     }
 }
