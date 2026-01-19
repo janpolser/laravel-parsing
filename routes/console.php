@@ -65,7 +65,7 @@ Schedule::command('kuper:collect-vacancies')
 
 
 // Создание архивов
-Schedule::command('yandex:vacancy-yandex')
+Schedule::command('xml:tar')
     ->weeklyOn(1, '8:00')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
