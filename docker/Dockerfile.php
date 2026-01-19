@@ -48,4 +48,3 @@ WORKDIR /var/www
 
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["supercronic", "/etc/crontab"]
-wb
