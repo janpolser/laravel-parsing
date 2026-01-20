@@ -5,7 +5,9 @@ namespace App\Console\Commands\Kuper;
 use App\Services\YandexFeedXmlFormat;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Http;
+use Symfony\Component\Process\Exception\ProcessFailedException;
+use Symfony\Component\Process\Process;
+use GuzzleHttp\Cookie\CookieJar;
 
 class CollectVacancies extends Command
 {
@@ -186,6 +188,8 @@ class CollectVacancies extends Command
         ],
     ];
 
+    private const PLAYWRIGHT_TIMEOUT_MS = 60000;
+
     private YandexFeedXmlFormat $xmlFormatter;
 
     public function __construct(YandexFeedXmlFormat $xmlFormatter)
@@ -233,7 +237,7 @@ class CollectVacancies extends Command
 
     private function loadCityEntries(): array
     {
-        $cities = $this->fetchCitiesFromChunk();
+        $cities = $this->fetchCitiesFromPlaywright();
 
         $normalized = [];
         foreach ($cities as $slug => $entry) {
@@ -247,79 +251,34 @@ class CollectVacancies extends Command
         return $normalized;
     }
 
-    private function fetchCitiesFromChunk(): array
+    private function fetchCitiesFromPlaywright(): array
     {
-        $this->info('Загружаю страницу https://kuper.ru/rabota/velokurer ...');
-        $resp = Http::timeout(20)->get('https://kuper.ru/rabota/velokurer');
-        if (!$resp->ok()) {
-            throw new \RuntimeException('Не удалось загрузить страницу велокурьера.');
+        $script = base_path('scripts/kuper_cities_playwright.cjs');
+        if (!is_file($script)) {
+            throw new \RuntimeException('Не найден скрипт Playwright: ' . $script);
         }
 
-        $html = $resp->body();
-        if (!preg_match_all('/\\/chunks\\/([A-Za-z0-9-]+\\.js)/', $html, $matches)) {
-            throw new \RuntimeException('Не найден ни один chunk-файл на странице.');
-        }
-        $this->info('chunk-файлов найдено: ' . count($matches[1]));
+        $this->info('Запускаю Playwright для получения списка городов...');
+        $process = new Process([
+            'node',
+            $script,
+            'https://kuper.ru/rabota/velokurer',
+            (string) self::PLAYWRIGHT_TIMEOUT_MS,
+        ], base_path());
+        $process->setTimeout((int) ceil(self::PLAYWRIGHT_TIMEOUT_MS / 1000) + 10);
+        $process->run();
 
-        $seen = [];
-        foreach (array_unique($matches[1]) as $file) {
-            $url = $this->resolveChunkUrl($file);
-            if (isset($seen[$url])) {
-                continue;
-            }
-            $seen[$url] = true;
-
-            $this->info("Проверяю chunk {$url}");
-            $chunkResp = Http::timeout(20)->get($url);
-            if (!$chunkResp->ok()) {
-                continue;
-            }
-
-            if ($cities = $this->extractCitiesFromChunk($chunkResp->body())) {
-                $this->info("Список городов найден в {$url}");
-
-                return $cities;
-            }
-            $this->info("Не удалось распарсить список городов в {$url}");
+        if (!$process->isSuccessful()) {
+            throw new ProcessFailedException($process);
         }
 
-        throw new \RuntimeException('Не удалось найти список городов в chunk-чанках.');
-    }
-
-    private function extractCitiesFromChunk(string $chunk): ?array
-    {
-
-        $pattern = '/(\w+)\s*=\s*JSON\.parse\s*\(\s*(["\'])(.*?)\2\s*\)/s';
-        if (!preg_match_all($pattern, $chunk, $matches)) {
-            return null;
-        }
-        foreach ($matches[3] as $raw) {
-
-            if (strpos($raw, '"abakan"') === false) {
-                continue;
-            }
-            $payload = stripcslashes($raw);
-            $decoded = json_decode($payload, true);
-            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                return $decoded;
-            }
-            dump('error');
+        $payload = trim($process->getOutput());
+        $decoded = json_decode($payload, true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($decoded)) {
+            throw new \RuntimeException('Playwright вернул некорректный JSON.');
         }
 
-        return null;
-    }
-
-    private function resolveChunkUrl(string $file): string
-    {
-        if (str_starts_with($file, 'http')) {
-            return $file;
-        }
-
-        if (str_starts_with($file, '/')) {
-            return 'https://kuper.ru' . $file;
-        }
-
-        return 'https://kuper.ru/rabota/_next/static/chunks/' . ltrim($file, '/');
+        return $decoded;
     }
 
     private function buildFeedEntities(array $cities): array

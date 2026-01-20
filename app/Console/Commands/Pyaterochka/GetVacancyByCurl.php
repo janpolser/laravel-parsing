@@ -20,7 +20,7 @@ class GetVacancyByCurl extends Command
         $timeout = 60;
 
         date_default_timezone_set('Europe/Moscow');
-        ini_set('memory_limit', '16384M');
+        ini_set('memory_limit', '8G');
         $date = new DateTime;
 
         try {
