@@ -38,6 +38,9 @@ async function main() {
   await page.waitForTimeout(1000);
 
   const html = await page.content();
+  process.stderr.write(`--- HTML START (${targetUrl}) ---\n`);
+  process.stderr.write(html);
+  process.stderr.write(`\n--- HTML END (${targetUrl}) ---\n`);
   const chunkRe = /\/chunks\/([A-Za-z0-9-]+\.js)/g;
   const files = new Set();
   let match;
