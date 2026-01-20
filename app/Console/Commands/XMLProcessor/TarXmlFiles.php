@@ -13,17 +13,17 @@ class TarXmlFiles extends Command
 
     public function handle()
     {
-        $this->process('storage/app/public/5ka');
-        $this->process('storage/app/public/kuper');
-        $this->process('storage/app/public/magnit');
-        $this->process('storage/app/public/rzhd');
-        $this->process('storage/app/public/wb');
-        $this->process('storage/app/public/yandex');
+        $this->process('storage/app/public/5ka', '5ka');
+        $this->process('storage/app/public/kuper', 'kuper');
+        $this->process('storage/app/public/magnit', 'magnit');
+        $this->process('storage/app/public/rzhd', 'rzhd');
+        $this->process('storage/app/public/wb', 'wb');
+        $this->process('storage/app/public/yandex', 'yandex');
 
         return 0;
     }
 
-    private function process(string $folder)
+    private function process(string $folder, string $prefix)
     {
         if (!File::exists($folder)) {
             $this->error("Папка {$folder} не существует!");
@@ -55,7 +55,7 @@ class TarXmlFiles extends Command
 
         $this->info("Найдено " . count($xmlFiles) . " XML файлов в {$folder}");
 
-        $tarFileName = 'xml_files_' . date('Y-m-d_His') . '.tar';
+        $tarFileName = $prefix . date('Y-m-d_His') . '.tar';
         $tarPath = $latestDir . '/' . $tarFileName;
 
         $tarHandle = fopen($tarPath, 'x+');
