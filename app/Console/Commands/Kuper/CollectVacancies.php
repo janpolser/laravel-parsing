@@ -4,8 +4,10 @@ namespace App\Console\Commands\Kuper;
 
 use App\Services\YandexFeedXmlFormat;
 use Illuminate\Console\Command;
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
+use GuzzleHttp\Cookie\CookieJar;
 
 class CollectVacancies extends Command
 {
@@ -186,6 +188,23 @@ class CollectVacancies extends Command
         ],
     ];
 
+    private const REQUEST_DELAY_MIN_MS = 5000;
+    private const REQUEST_DELAY_MAX_MS = 10000;
+
+    private const USER_AGENTS = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edg/122.0.0.0',
+    ];
+
+    private const ACCEPT_LANGUAGES = [
+        'ru-RU,ru;q=0.9,en-US;q=0.7,en;q=0.6',
+        'ru,en;q=0.8,en-US;q=0.6',
+        'ru-RU,ru;q=0.8,en;q=0.7',
+    ];
+
     private YandexFeedXmlFormat $xmlFormatter;
 
     public function __construct(YandexFeedXmlFormat $xmlFormatter)
@@ -249,8 +268,12 @@ class CollectVacancies extends Command
 
     private function fetchCitiesFromChunk(): array
     {
+        $cookieJar = new CookieJar();
+
         $this->info('Загружаю страницу https://kuper.ru/rabota/velokurer ...');
-        $resp = Http::timeout(20)->get('https://kuper.ru/rabota/velokurer');
+        $this->sleepRandomDelay();
+        $resp = $this->makeRequest($cookieJar)
+            ->get('https://kuper.ru/rabota/velokurer');
         if (!$resp->ok()) {
             throw new \RuntimeException('Не удалось загрузить страницу велокурьера.');
         }
@@ -270,7 +293,9 @@ class CollectVacancies extends Command
             $seen[$url] = true;
 
             $this->info("Проверяю chunk {$url}");
-            $chunkResp = Http::timeout(20)->get($url);
+            $this->sleepRandomDelay();
+            $chunkResp = $this->makeRequest($cookieJar, 'https://kuper.ru/rabota/velokurer')
+                ->get($url);
             if (!$chunkResp->ok()) {
                 continue;
             }
@@ -307,6 +332,40 @@ class CollectVacancies extends Command
         }
 
         return null;
+    }
+
+    private function makeRequest(CookieJar $cookieJar, ?string $referer = null): PendingRequest
+    {
+        return Http::timeout(20)
+            ->withHeaders($this->makeHeaders($referer))
+            ->withOptions(['cookies' => $cookieJar]);
+    }
+
+    private function makeHeaders(?string $referer = null): array
+    {
+        $headers = [
+            'User-Agent' => self::USER_AGENTS[array_rand(self::USER_AGENTS)],
+            'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language' => self::ACCEPT_LANGUAGES[array_rand(self::ACCEPT_LANGUAGES)],
+            'Accept-Encoding' => 'gzip, deflate, br',
+            'Cache-Control' => 'no-cache',
+            'Pragma' => 'no-cache',
+            'Connection' => 'keep-alive',
+            'DNT' => '1',
+            'Upgrade-Insecure-Requests' => '1',
+        ];
+
+        if ($referer) {
+            $headers['Referer'] = $referer;
+        }
+
+        return $headers;
+    }
+
+    private function sleepRandomDelay(): void
+    {
+        $delayMs = random_int(self::REQUEST_DELAY_MIN_MS, self::REQUEST_DELAY_MAX_MS);
+        usleep($delayMs * 1000);
     }
 
     private function resolveChunkUrl(string $file): string
