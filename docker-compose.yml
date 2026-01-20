@@ -19,6 +19,19 @@ services:
       - app-network
     restart: unless-stopped
 
+  webserver:
+    container_name: nginx-vacancies
+    image: openresty/openresty:alpine
+    ports:
+      - "127.0.0.1:86:80"
+    volumes:
+      - ./storage/app/public:/var/www/public
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d
+    depends_on:
+      - app
+    networks:
+      - app-network
+
 networks:
   app-network:
     driver: bridge
