@@ -253,7 +253,7 @@ class CollectVacancies extends Command
 
     private function fetchCitiesFromPlaywright(): array
     {
-        $script = base_path('scripts/kuper_cities_playwright.cjs');
+        $script = base_path('scripts/kuper_cities_playwright.js');
         if (!is_file($script)) {
             throw new \RuntimeException('Не найден скрипт Playwright: ' . $script);
         }
