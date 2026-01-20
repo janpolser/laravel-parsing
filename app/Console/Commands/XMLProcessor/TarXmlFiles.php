@@ -13,6 +13,7 @@ class TarXmlFiles extends Command
 
     public function handle()
     {
+        ini_set('memory_limit', '4G');
         $this->process('storage/app/public/5ka');
         $this->process('storage/app/public/kuper');
         $this->process('storage/app/public/magnit');
