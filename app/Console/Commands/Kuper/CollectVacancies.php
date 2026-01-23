@@ -149,6 +149,7 @@ class CollectVacancies extends Command
             'salary_to'      => 332000,
             'salary_per_day' => 9600,
             'description'    => self::TEXT_BIKE_AND_WALK,
+            'specialization' => 'Курьер'
         ],
         [
             'key'            => 'walking_courier',
@@ -158,6 +159,7 @@ class CollectVacancies extends Command
             'salary_to'      => 332000,
             'salary_per_day' => 9600,
             'description'    => self::TEXT_BIKE_AND_WALK,
+            'specialization' => 'Курьер'
         ],
         [
             'key'            => 'driver_courier',
@@ -167,6 +169,7 @@ class CollectVacancies extends Command
             'salary_to'      => 352000,
             'salary_per_day' => 11300,
             'description'    => self::TEXT_DRIVER,
+            'specialization' => 'Курьер'
         ],
         [
             'key'            => 'auto_courier',
@@ -176,6 +179,7 @@ class CollectVacancies extends Command
             'salary_to'      => 352000,
             'salary_per_day' => 11300,
             'description'    => self::TEXT_DRIVER,
+            'specialization' => 'Курьер'
         ],
         [
             'key'            => 'picker',
@@ -185,6 +189,7 @@ class CollectVacancies extends Command
             'salary_to'      => 120000,
             'salary_per_day' => 3900,
             'description'    => self::TEXT_PICKER,
+            'specialization' => 'Сборщик'
         ],
     ];
 
@@ -1017,6 +1022,7 @@ class CollectVacancies extends Command
             ]];
             $entity['category'] = [
                 'industry' => 'Логистика и доставка',
+                'specialization' => $vacancy['specialization']
             ];
         }
 
