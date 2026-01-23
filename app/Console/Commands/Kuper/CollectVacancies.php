@@ -1017,7 +1017,6 @@ class CollectVacancies extends Command
             ]];
             $entity['category'] = [
                 'industry' => 'Логистика и доставка',
-                'specialization' => $cityName,
             ];
         }
 
