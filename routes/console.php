@@ -63,7 +63,11 @@ Schedule::command('kuper:collect-vacancies')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
-
+Schedule::command('hirehi:parse-vacancies')
+    ->weeklyOn(1, '8:00')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->withoutOverlapping();
+    
 // Создание архивов
 Schedule::command('xml:tar')
     ->weeklyOn(1, '8:00')

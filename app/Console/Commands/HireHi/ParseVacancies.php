@@ -174,20 +174,24 @@ class ParseVacancies extends Command
                             sleep(1); // Пауза между запросами деталей
                         }
 
+                        // Замена NDA на "Анонимный Работодатель"
+                        $companyName = $vacancy['company'] ?? 'HireHi';
+                        $companyName = $this->anonymizeCompany($companyName);
+
                         $editedVacancy = [
                             'url' => $vacancyUrl,
                             'mobile_url' => $vacancyUrl,
                             'creation_date' => $creationDate,
                             'job_name' => $vacancyName,
                             'description' => $description,
-                            'company_name' => $vacancy['company'] ?? 'HireHi',
+                            'company_name' => $companyName,
                             'hr_agency' => 'false',
                             'category' => ['industry' => $category],
                         ];
 
-                        // Зарплата (приходит как строка "от 540 000 ₽" или "~ от 316 000 ₽")
+                        // Зарплата - форматируем в читаемый вид
                         $salaryStr = $vacancy['salary'] ?? '';
-                        $editedVacancy['salary'] = $this->parseSalary($salaryStr);
+                        $editedVacancy['salary'] = $this->formatSalary($salaryStr);
                         $editedVacancy['currency'] = 'RUB';
 
                         // Формат работы (строка типа "офис Ереван", "удалённо", "гибрид Алматы")
@@ -316,18 +320,42 @@ class ParseVacancies extends Command
     }
 
     /**
-     * Парсинг зарплаты
+     * Форматирование зарплаты в читаемый вид
+     * "~ от 74 100 ₽" → "от 74 100 рублей"
      */
-    private function parseSalary(string $salaryStr): string
+    private function formatSalary(string $salaryStr): string
     {
         if (empty($salaryStr)) {
             return '';
         }
         
-        // Убираем лишние символы: ₽, ~, пробелы в числах
-        $cleaned = str_replace(['₽', 'руб.', ' ', ' ', '~'], ['', '', '', '', ''], $salaryStr);
+        // Заменяем символы
+        $formatted = str_replace(['₽', '~'], ['', ''], $salaryStr);
+        $formatted = trim($formatted);
         
-        return trim($cleaned);
+        // Заменяем "₽" на "рублей" в конце строки
+        $formatted = preg_replace('/\s*$/', ' рублей', $formatted);
+        
+        return $formatted;
+    }
+
+    /**
+     * Замена NDA на "Анонимный Работодатель"
+     */
+    private function anonymizeCompany(string $companyName): string
+    {
+        $companyName = trim($companyName);
+        
+        // Различные варианты NDA (в любом регистре)
+        $ndaVariants = ['nda', 'NDA', 'НДА', 'нда', 'Nda', 'N.D.A.', 'N.D.A'];
+        
+        foreach ($ndaVariants as $nda) {
+            if (strcasecmp($companyName, $nda) === 0) {
+                return 'Анонимный Работодатель';
+            }
+        }
+        
+        return $companyName;
     }
 
     /**
