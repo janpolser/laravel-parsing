@@ -8,162 +8,229 @@ use Illuminate\Support\Facades\Log;
 
 class VacancyYandex extends Command
 {
-    protected $signature = 'app:vacancy-yandex';
+    private const API_URL = 'https://yandex.ru/jobs/api/publications';
+    private const PAGE_SIZE = 20;
 
-    protected $description = 'Command description';
+    protected $signature = 'app:vacancy-yandex
+        {--cursor= : Начальный cursor для пагинации}
+        {--max-pages=0 : Максимальное число страниц за запуск (0 = без лимита, парсить все)}
+        {--delay-min-ms=2500 : Минимальная задержка между запросами, мс}
+        {--delay-max-ms=5500 : Максимальная задержка между запросами, мс}
+        {--max-retries=5 : Ретраи для 429/5xx и сетевых ошибок}
+        {--output=yandex_vacancies.json : Имя выходного файла в storage/app}';
 
-//    public function handle()
-//    {
-//        $response = Http::get('https://crowd.yandex.ru/vacancies');
-//        $html = $response->body();
-//
-//        // Простой поиск по id="data"
-//        if (preg_match('/<script id="data"[^>]*>([\s\S]*?)<\/script>/', $html, $matches)) {
-//            $json = trim($matches[1]);
-//            $this->info('JSON найден!');
-//
-//            // Выводим JSON
-//            $this->line($json);
-//
-//            // Сохраняем в файл
-//            file_put_contents(storage_path('app/vacancies.json'), $json);
-//            $this->info('Сохранено в storage/app/vacancies.json');
-//
-//        } else {
-//            $this->error('JSON не найден');
-//        }
-//
-//        return 0;
-//    }
+    protected $description = 'Парсинг вакансий Yandex Jobs API c бережным rate-limit режимом';
 
-//    public function handle()
-//    {
-//        // Попробуем с разными заголовками как у реального браузера
-//        $response = Http::withHeaders([
-//            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-//            'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-//            'Accept-Language' => 'ru-RU,ru;q=0.9,en;q=0.8',
-//            'Accept-Encoding' => 'gzip, deflate, br',
-//            'Cache-Control' => 'no-cache',
-//            'Connection' => 'keep-alive',
-//            'Upgrade-Insecure-Requests' => '1',
-//            'Sec-Fetch-Dest' => 'document',
-//            'Sec-Fetch-Mode' => 'navigate',
-//            'Sec-Fetch-Site' => 'none',
-//            'Sec-Fetch-User' => '?1',
-//            'sec-ch-ua' => '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-//            'sec-ch-ua-mobile' => '?0',
-//            'sec-ch-ua-platform' => '"Windows"',
-//        ])
-//            ->withOptions([
-//                'verify' => false, // отключаем SSL verify (осторожно!)
-//                'timeout' => 30,
-//            ])
-//            ->get('https://crowd.yandex.ru/vacancies');
-//
-//        if ($response->successful()) {
-//            $html = $response->body();
-//
-//            if (preg_match('/<script id="data"[^>]*>([\s\S]*?)<\/script>/', $html, $matches)) {
-//                $json = trim($matches[1]);
-//                file_put_contents(storage_path('app/vacancies.json'), $json);
-//                $this->info('Данные получены!');
-//                $this->line($json);
-//            } else {
-//                $this->error('JSON не найден в ответе');
-//                file_put_contents(storage_path('app/debug.html'), $html);
-//                $this->info('HTML сохранен в storage/app/debug.html для отладки');
-//            }
-//        } else {
-//            $this->error('HTTP Error: ' . $response->status());
-//        }
-//
-//        return 0;
-//    }
+    public function handle(): int
+    {
+        $maxPages = max(0, (int) $this->option('max-pages'));
+        $delayMin = max(500, (int) $this->option('delay-min-ms'));
+        $delayMax = max($delayMin, (int) $this->option('delay-max-ms'));
+        $maxRetries = max(0, (int) $this->option('max-retries'));
+        $outputName = (string) $this->option('output');
+        $isUnlimited = $maxPages === 0;
 
-//    public function handle()
-//    {
-//        $response = Http::get('https://crowd.yandex.ru/vacancies');
-//        $html = $response->body();
-//
-////         Простой поиск по id="data"
-//        if (preg_match('/<script id="data"[^>]*>([\s\S]*?)<\/script>/', $html, $matches)) {
-//            $json = trim($matches[1]);
-//            $this->info('JSON найден!');
-//
-//            // Выводим JSON
-//            $this->line($json);
-//
-//            // Сохраняем в файл как сырой JSON
-//            file_put_contents(storage_path('app/vacancies.json'), $json);
-//            $this->info('Сохранено в storage/app/vacancies.json');
-//
-//            // Дополнительно: сохраняем в формате с метаданными
-//            $dataWithMeta = [
-//                'parsed_at' => now()->toISOString(),
-//                'source' => 'https://crowd.yandex.ru/vacancies',
-//                'data' => json_decode($json, true) // преобразуем в массив и обратно для красивого форматирования
-//            ];
-//
-//            file_put_contents(
-//                storage_path('app/vacancies_formatted.json'),
-//                json_encode($dataWithMeta, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
-//            );
-//            $this->info('Форматированная версия сохранена в storage/app/vacancies_formatted.json');
-//
-//        } else {
-//            $this->error('JSON не найден');
-//        }
-//
-//        return 0;
-//    }
+        $cursor = $this->normalizeCursor($this->option('cursor'));
+        $seenCursors = [];
+        $publications = [];
+        $pagesFetched = 0;
 
-//    public function handle()
-//    {
-//        // Случайная задержка от 1 до 3 секунд
-//        sleep(rand(1, 3));
-//
-//        $response = Http::timeout(30)
-//            ->withHeaders([
-//                'User-Agent' => $this->getRandomUserAgent(),
-//                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-//                'Accept-Language' => 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
-//                'Accept-Encoding' => 'gzip, deflate, br',
-//                'Connection' => 'keep-alive',
-//                'Upgrade-Insecure-Requests' => '1',
-//            ])
-//            ->get('https://crowd.yandex.ru/vacancies');
-//
-//        if (!$response->successful()) {
-//            $this->error('HTTP Error: ' . $response->status());
-//            return 1;
-//        }
-//
-//        $html = $response->body();
-//
-//        if (preg_match('/<script id="data"[^>]*>([\s\S]*?)<\/script>/', $html, $matches)) {
-//            $json = trim($matches[1]);
-//            $this->info('JSON найден!');
-//
-//            file_put_contents(storage_path('app/vacancies.json'), $json);
-//            $this->info('Сохранено в storage/app/vacancies.json');
-//
-//        } else {
-//            $this->error('JSON не найден');
-//        }
-//
-//        return 0;
-//    }
-//
-//    private function getRandomUserAgent(): string
-//    {
-//        $agents = [
-//            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-//            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-//            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-//            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-//        ];
-//
-//        return $agents[array_rand($agents)];
-//    }
+        $this->info(sprintf(
+            'Старт Yandex parser: max-pages=%s, delay=%d-%dms, page_size=%d',
+            $isUnlimited ? 'all' : (string) $maxPages,
+            $delayMin,
+            $delayMax,
+            self::PAGE_SIZE
+        ));
+
+        while (true) {
+            if ($cursor !== null && isset($seenCursors[$cursor])) {
+                $this->warn('Остановлено: обнаружен повтор cursor (защита от зацикливания).');
+                break;
+            }
+
+            if ($cursor !== null) {
+                $seenCursors[$cursor] = true;
+            }
+
+            $response = $this->requestPage($cursor, $maxRetries);
+
+            if ($response === null) {
+                $this->error('Остановлено: не удалось получить страницу после ретраев.');
+                return self::FAILURE;
+            }
+
+            $json = $response->json();
+            if (!is_array($json)) {
+                $this->error('Остановлено: API вернул невалидный JSON.');
+                return self::FAILURE;
+            }
+
+            $results = $json['results'] ?? null;
+            if (!is_array($results)) {
+                $this->error('Остановлено: в ответе нет массива results.');
+                return self::FAILURE;
+            }
+
+            $publications = array_merge($publications, $results);
+            $pagesFetched++;
+
+            $nextCursor = $this->extractCursorFromNext($json['next'] ?? null);
+
+            $this->line(sprintf(
+                'Страница %d: получено %d, всего %d%s',
+                $pagesFetched,
+                count($results),
+                count($publications),
+                $nextCursor ? ', next cursor есть' : ', next cursor нет'
+            ));
+
+            if ($nextCursor === null) {
+                break;
+            }
+
+            $cursor = $nextCursor;
+
+            if (!$isUnlimited && $pagesFetched >= $maxPages) {
+                $this->warn("Достигнут лимит страниц: {$maxPages}");
+                break;
+            }
+
+            $this->sleepWithJitter($delayMin, $delayMax);
+        }
+
+        $payload = [
+            'parsed_at' => now()->toIso8601String(),
+            'source' => self::API_URL,
+            'page_size' => self::PAGE_SIZE,
+            'pages_fetched' => $pagesFetched,
+            'total_publications' => count($publications),
+            'next_cursor_for_resume' => $cursor,
+            'publications' => $publications,
+        ];
+
+        $outputPath = storage_path('app/' . ltrim($outputName, '/'));
+        file_put_contents(
+            $outputPath,
+            json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)
+        );
+
+        $this->info('Готово. Сохранено: ' . $outputPath);
+
+        return self::SUCCESS;
+    }
+
+    private function requestPage(?string $cursor, int $maxRetries)
+    {
+        $query = ['page_size' => self::PAGE_SIZE];
+        if ($cursor !== null) {
+            $query['cursor'] = $cursor;
+        }
+
+        $attempt = 0;
+
+        while ($attempt <= $maxRetries) {
+            $attempt++;
+
+            try {
+                $response = Http::timeout(20)
+                    ->acceptJson()
+                    ->withHeaders([
+                        'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                        'Accept-Language' => 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                        'Referer' => 'https://yandex.ru/jobs/vacancies',
+                    ])
+                    ->get(self::API_URL, $query);
+            } catch (\Throwable $e) {
+                Log::warning('Yandex parser network error', [
+                    'cursor' => $cursor,
+                    'attempt' => $attempt,
+                    'message' => $e->getMessage(),
+                ]);
+
+                if ($attempt > $maxRetries) {
+                    return null;
+                }
+
+                $this->backoff($attempt, null);
+                continue;
+            }
+
+            $status = $response->status();
+
+            if ($response->successful()) {
+                return $response;
+            }
+
+            Log::warning('Yandex parser non-200 response', [
+                'cursor' => $cursor,
+                'attempt' => $attempt,
+                'status' => $status,
+                'body_snippet' => mb_substr($response->body(), 0, 400),
+            ]);
+
+            if (!$this->shouldRetryStatus($status) || $attempt > $maxRetries) {
+                return null;
+            }
+
+            $retryAfter = (int) $response->header('Retry-After', 0);
+            $this->backoff($attempt, $retryAfter > 0 ? $retryAfter : null);
+        }
+
+        return null;
+    }
+
+    private function shouldRetryStatus(int $status): bool
+    {
+        return $status === 429 || ($status >= 500 && $status <= 599);
+    }
+
+    private function backoff(int $attempt, ?int $retryAfterSeconds): void
+    {
+        if ($retryAfterSeconds !== null) {
+            $sleepMs = max(1000, $retryAfterSeconds * 1000);
+        } else {
+            $baseMs = 2000;
+            $maxMs = 30000;
+            $sleepMs = min($maxMs, (int) ($baseMs * (2 ** ($attempt - 1))));
+            $sleepMs += random_int(200, 1200);
+        }
+
+        $this->warn("Retry через {$sleepMs}ms");
+        usleep($sleepMs * 1000);
+    }
+
+    private function sleepWithJitter(int $minMs, int $maxMs): void
+    {
+        $sleepMs = random_int($minMs, $maxMs);
+        usleep($sleepMs * 1000);
+    }
+
+    private function extractCursorFromNext(mixed $next): ?string
+    {
+        if (!is_string($next) || $next === '') {
+            return null;
+        }
+
+        $query = parse_url($next, PHP_URL_QUERY);
+        if (!is_string($query) || $query === '') {
+            return null;
+        }
+
+        parse_str($query, $params);
+        $cursor = $params['cursor'] ?? null;
+
+        return is_string($cursor) && $cursor !== '' ? $cursor : null;
+    }
+
+    private function normalizeCursor(mixed $cursor): ?string
+    {
+        if (!is_string($cursor)) {
+            return null;
+        }
+
+        $cursor = trim($cursor);
+
+        return $cursor !== '' ? $cursor : null;
+    }
 }
