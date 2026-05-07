@@ -9,6 +9,7 @@ libzip-dev \
 libxml2-dev \
 libcurl4-openssl-dev \
 libssl-dev \
+libpq-dev \
 libonig-dev \
 gnupg \
 ca-certificates \
@@ -24,7 +25,11 @@ xml \
 pcntl \
 bcmath \
 sockets \
-curl
+curl \
+pdo_pgsql
+
+RUN pecl install redis \
+&& docker-php-ext-enable redis
 
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 && apt-get install -y nodejs \

@@ -13,8 +13,72 @@ services:
       APP_DEBUG: ${APP_DEBUG:-true}
       TZ: ${TZ:-Europe/Moscow}
       COMPOSER_CACHE_DIR: /tmp/composer-cache
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: ${POSTGRES_DB:-laravel_parsing}
+      DB_USERNAME: ${POSTGRES_USER:-laravel}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      QUEUE_CONNECTION: redis
+      CACHE_STORE: redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${DOCKER_REDIS_PASSWORD:-redis}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-http://ollama:11434/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama}
+      OPENAI_MODEL: ${OPENAI_MODEL:-llama3.1}
+      LLM_API_PROVIDER: ${LLM_API_PROVIDER:-openai}
+      UNIVERSAL_SCRAPER_SCHEDULER_ENABLED: ${UNIVERSAL_SCRAPER_SCHEDULER_ENABLED:-false}
     stdin_open: true
     tty: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  queue:
+    container_name: vacancies-queue
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.php
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+      - composer-cache:/tmp/composer-cache
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      APP_DEBUG: ${APP_DEBUG:-true}
+      TZ: ${TZ:-Europe/Moscow}
+      COMPOSER_CACHE_DIR: /tmp/composer-cache
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: ${POSTGRES_DB:-laravel_parsing}
+      DB_USERNAME: ${POSTGRES_USER:-laravel}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      QUEUE_CONNECTION: redis
+      CACHE_STORE: redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${DOCKER_REDIS_PASSWORD:-redis}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-http://ollama:11434/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama}
+      OPENAI_MODEL: ${OPENAI_MODEL:-llama3.1}
+      LLM_API_PROVIDER: ${LLM_API_PROVIDER:-openai}
+    command: ["php", "artisan", "queue:work", "redis", "--queue=find_career,scrape_site,default", "--sleep=3", "--tries=3", "--timeout=1800"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
     networks:
       - app-network
     restart: unless-stopped
@@ -32,10 +96,91 @@ services:
     networks:
       - app-network
 
+  postgres:
+    container_name: vacancies-postgres
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-laravel_parsing}
+      POSTGRES_USER: ${POSTGRES_USER:-laravel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+    ports:
+      - "127.0.0.1:${FORWARD_DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laravel} -d ${POSTGRES_DB:-laravel_parsing}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  redis:
+    container_name: vacancies-redis
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${DOCKER_REDIS_PASSWORD:-redis}"]
+    ports:
+      - "127.0.0.1:${FORWARD_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${DOCKER_REDIS_PASSWORD:-redis}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  ollama:
+    container_name: vacancies-ollama
+    image: ollama/ollama:latest
+    ports:
+      - "127.0.0.1:${FORWARD_OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  ollama_gpu:
+    container_name: vacancies-ollama-gpu
+    image: ollama/ollama:latest
+    profiles: ["gpu"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "127.0.0.1:${FORWARD_OLLAMA_GPU_PORT:-11435}:11434"
+    volumes:
+      - ollama_gpu:/root/.ollama
+    networks:
+      - app-network
+    restart: unless-stopped
+
 networks:
   app-network:
     driver: bridge
 
 volumes:
   composer-cache:
+    driver: local
+  pgdata:
+    driver: local
+  redisdata:
+    driver: local
+  ollama:
+    driver: local
+  ollama_gpu:
     driver: local
