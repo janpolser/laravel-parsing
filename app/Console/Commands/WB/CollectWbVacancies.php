@@ -269,7 +269,7 @@ class CollectWbVacancies extends Command
     {
         $parts = [];
         if (!empty($detail['description'])) {
-            $parts[] = $this->escapeForXml($detail['description']);
+            $parts[] = $this->normalizeText($detail['description']);
         }
         if (!empty($detail['requirements_arr']) && is_array($detail['requirements_arr'])) {
             $parts[] = $this->composeArrayString($detail['requirements_arr']);
@@ -278,15 +278,19 @@ class CollectWbVacancies extends Command
             $parts[] = $this->composeArrayString($detail['conditions_arr']);
         }
 
-        return $parts ? implode("\n", $parts) : null;
+        return $parts ? implode("\n\n", array_filter($parts)) : null;
     }
 
     private function composeArrayString(array $values): ?string
     {
         $clean = [];
         foreach ($values as $value) {
-            $text = trim($value);
-            if ($text === '') {
+            if (!is_scalar($value)) {
+                continue;
+            }
+
+            $text = $this->normalizeText((string) $value);
+            if ($text === null || $text === '') {
                 continue;
             }
 
@@ -303,7 +307,7 @@ class CollectWbVacancies extends Command
             return null;
         }
 
-        return $this->escapeForXml(implode('; ', $clean));
+        return implode(";\n", $clean);
     }
 
     private function buildCategory(array $row): array
@@ -345,7 +349,7 @@ class CollectWbVacancies extends Command
         }
 
         return [[
-            'location' => $this->escapeForXml($location),
+            'location' => $this->normalizeText($location),
             'metro' => null,
             'lng' => null,
             'lat' => null,
@@ -392,18 +396,21 @@ class CollectWbVacancies extends Command
         return $result;
     }
 
-    private function escapeForXml(?string $value): ?string
+    private function normalizeText(?string $value): ?string
     {
         if ($value === null) {
             return null;
         }
 
-        $text = strip_tags(html_entity_decode($value, ENT_QUOTES | ENT_XML1, 'UTF-8'));
-        $text = preg_replace('/\s+/', ' ', $text);
-        return str_replace(
-            ['"', '&', '>', '<', '\''],
-            ['&quot;', '&amp;', '&gt;', '&lt;', '&apos;'],
-            trim($text)
-        );
+        $text = html_entity_decode($value, ENT_QUOTES | ENT_XML1, 'UTF-8');
+        $text = preg_replace('/<\s*br\s*\/?>/iu', "\n", $text) ?? $text;
+        $text = preg_replace('/<\/\s*(p|div|li|ul|ol|h[1-6]|section|article|tr)\s*>/iu', "\n", $text) ?? $text;
+        $text = strip_tags($text);
+        $text = str_replace(["\r\n", "\r", "\xC2\xA0"], ["\n", "\n", ' '], $text);
+        $text = preg_replace('/[^\S\n]+/u', ' ', $text) ?? $text;
+        $text = preg_replace('/ *\n */u', "\n", $text) ?? $text;
+        $text = preg_replace('/\n{3,}/u', "\n\n", $text) ?? $text;
+
+        return trim($text);
     }
 }

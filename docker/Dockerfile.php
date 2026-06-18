@@ -7,6 +7,9 @@ unzip \
 zip \
 libzip-dev \
 libxml2-dev \
+libpng-dev \
+libjpeg62-turbo-dev \
+libfreetype6-dev \
 libcurl4-openssl-dev \
 libssl-dev \
 libonig-dev \
@@ -17,14 +20,19 @@ dumb-init \
 && apt-get clean \
 && rm -rf /var/lib/apt/lists/*
 
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg
+
 RUN docker-php-ext-install \
 zip \
 mbstring \
 xml \
+gd \
 pcntl \
 bcmath \
 sockets \
 curl
+
+RUN git config --global --add safe.directory /var/www
 
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 && apt-get install -y nodejs \
