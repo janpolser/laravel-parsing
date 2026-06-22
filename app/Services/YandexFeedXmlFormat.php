@@ -4,7 +4,8 @@ namespace App\Services;
 
 use DateTime;
 use Exception;
-use SimpleXMLElement;
+use Illuminate\Support\Facades\Log;
+use XMLWriter;
 
 class YandexFeedXmlFormat
 {
@@ -15,18 +16,48 @@ class YandexFeedXmlFormat
     public function createXmlFeed(array $entities, string $hostName, string $filePath): void
     {
         date_default_timezone_set('Europe/Moscow');
-        $xml = new SimpleXMLElement('<?xml version="1.0" encoding="utf-8"?><source></source>');
-        $xml->addAttribute('creation-time', (new DateTime)->format('Y-m-d H:i:s') . ' GMT+3');
-        $xml->addAttribute('host', $hostName);
+        $this->ensureDirectory($filePath);
 
-        $vacanciesNode = $xml->addChild('vacancies');
-
-        foreach ($entities as $entity) {
-            $this->validateVacancy($entity);
-            $this->addVacancyToXml($vacanciesNode, $entity);
+        $tmpPath = $filePath . '.tmp';
+        if (is_file($tmpPath)) {
+            unlink($tmpPath);
         }
 
-        $xml->asXML($filePath);
+        $writer = new XMLWriter();
+        if (!$writer->openURI($tmpPath)) {
+            throw new Exception("Cannot open XML file for writing: {$tmpPath}");
+        }
+
+        try {
+            $writer->startDocument('1.0', 'utf-8');
+            $writer->startElement('source');
+            $writer->writeAttribute('creation-time', (new DateTime)->format('Y-m-d H:i:s') . ' GMT+3');
+            $writer->writeAttribute('host', $hostName);
+            $writer->startElement('vacancies');
+
+            foreach ($entities as $entity) {
+                try {
+                    $this->validateVacancy($entity);
+                    $this->addVacancyToXml($writer, $entity);
+                } catch (Exception $e) {
+                    $this->logSkippedVacancy($entity, $e);
+                }
+            }
+
+            $writer->endElement(); // vacancies
+            $writer->endElement(); // source
+            $writer->endDocument();
+            $writer->flush();
+
+            $this->publishTmpFile($tmpPath, $filePath);
+        } catch (\Throwable $e) {
+            $writer->flush();
+            if (is_file($tmpPath)) {
+                unlink($tmpPath);
+            }
+
+            throw $e;
+        }
     }
 
     private function validateVacancy(array $vacancy): void
@@ -38,90 +69,165 @@ class YandexFeedXmlFormat
         }
     }
 
-    private function addVacancyToXml(SimpleXMLElement $parent, array $v): void
+    private function addVacancyToXml(XMLWriter $writer, array $v): void
     {
-        $node = $parent->addChild('vacancy');
+        $writer->startElement('vacancy');
 
-        // Базовые поля
-        $this->addTextChild($node, 'url', $v['url']);
-        $this->addTextChild($node, 'mobile-url', $v['mobile_url'] ?? null);
-        $this->addTextChild($node, 'creation-date', $v['creation_date']);
-        $this->addTextChild($node, 'update-date', $v['update_date'] ?? null);
+        $this->writeTextElement($writer, 'url', $v['url']);
+        $this->writeTextElement($writer, 'mobile-url', $v['mobile_url'] ?? null);
+        $this->writeTextElement($writer, 'creation-date', $v['creation_date']);
+        $this->writeTextElement($writer, 'update-date', $v['update_date'] ?? null);
 
-        // Зарплата
-        $this->addTextChild($node, 'salary', $v['salary'] ?? null);
-        $this->addTextChild($node, 'currency', $v['currency'] ?? null);
+        $this->writeTextElement($writer, 'salary', $v['salary'] ?? null);
+        $this->writeTextElement($writer, 'currency', $v['currency'] ?? null);
 
-        // Категории (Industry & Specialization)
         if (!empty($v['category'])) {
-            $cat = $node->addChild('category');
-            $this->addTextChild($cat, 'industry', $v['category']['industry'] ?? null);
-            $this->addTextChild($cat, 'specialization', $v['category']['specialization'] ?? null);
+            $writer->startElement('category');
+            $this->writeTextElement($writer, 'industry', $v['category']['industry'] ?? null);
+            $this->writeTextElement($writer, 'specialization', $v['category']['specialization'] ?? null);
+            $writer->endElement();
         }
 
-        $this->addTextChild($node, 'job-name', $v['job_name']);
-        $this->addTextChild($node, 'employment', $v['employment'] ?? null);
-        $this->addTextChild($node, 'schedule', $v['schedule'] ?? null);
-        $this->addTextChild($node, 'description', $v['description']);
-        $this->addTextChild($node, 'duty', $v['duty'] ?? null);
+        $this->writeTextElement($writer, 'job-name', $v['job_name']);
+        $this->writeTextElement($writer, 'employment', $v['employment'] ?? null);
+        $this->writeTextElement($writer, 'schedule', $v['schedule'] ?? null);
+        $this->writeTextElement($writer, 'description', $v['description']);
+        $this->writeTextElement($writer, 'duty', $v['duty'] ?? null);
 
-        // Условия (Term)
         if (!empty($v['term'])) {
-            $term = $node->addChild('term');
-            $this->addTextChild($term, 'contract', $v['term']['contract'] ?? null);
-            $this->addTextChild($term, 'text', $v['term']['text'] ?? null);
+            $writer->startElement('term');
+            $this->writeTextElement($writer, 'contract', $v['term']['contract'] ?? null);
+            $this->writeTextElement($writer, 'text', $v['term']['text'] ?? null);
+            $writer->endElement();
         }
 
-        // Требования (Requirement)
         if (!empty($v['requirement'])) {
-            $req = $node->addChild('requirement');
-            $this->addTextChild($req, 'age', $v['requirement']['age'] ?? null);
-            $this->addTextChild($req, 'sex', $v['requirement']['sex'] ?? null);
-            $this->addTextChild($req, 'education', $v['requirement']['education'] ?? null);
-            $this->addTextChild($req, 'experience', $v['requirement']['experience'] ?? null);
-            $this->addTextChild($req, 'qualification', $v['requirement']['qualification'] ?? null);
+            $writer->startElement('requirement');
+            $this->writeTextElement($writer, 'age', $v['requirement']['age'] ?? null);
+            $this->writeTextElement($writer, 'sex', $v['requirement']['sex'] ?? null);
+            $this->writeTextElement($writer, 'education', $v['requirement']['education'] ?? null);
+            $this->writeTextElement($writer, 'experience', $v['requirement']['experience'] ?? null);
+            $this->writeTextElement($writer, 'qualification', $v['requirement']['qualification'] ?? null);
+            $writer->endElement();
         }
 
-        // Адреса (поддержка массива адресов)
         if (!empty($v['addresses'])) {
-            $addresses = $node->addChild('addresses');
-            foreach ($v['addresses'] as $addrData) {
-                $address = $addresses->addChild('address');
-                $this->addTextChild($address, 'location', $addrData['location'] ?? null);
-                if (!empty($addrData['metro'])) {
-                    foreach ((array) $addrData['metro'] as $m) {
-                        $this->addTextChild($address, 'metro', $m);
-                    }
-                }
-                $this->addTextChild($address, 'lng', $addrData['lng'] ?? null);
-                $this->addTextChild($address, 'lat', $addrData['lat'] ?? null);
-            }
+            $this->writeAddresses($writer, $v['addresses']);
         }
 
-        // Компания
-        $comp = $node->addChild('company');
-        $this->addTextChild($comp, 'name', $v['company_name']);
-        $this->addTextChild($comp, 'description', $v['company_description'] ?? null);
-        $this->addTextChild($comp, 'logo', $v['company_logo'] ?? null);
-        $this->addTextChild($comp, 'site', $v['company_site'] ?? null);
+        $writer->startElement('company');
+        $this->writeTextElement($writer, 'name', $v['company_name']);
+        $this->writeTextElement($writer, 'description', $v['company_description'] ?? null);
+        $this->writeTextElement($writer, 'logo', $v['company_logo'] ?? null);
+        $this->writeTextElement($writer, 'site', $v['company_site'] ?? null);
 
         foreach (['email', 'phone', 'fax'] as $contactType) {
             if (!empty($v["company_$contactType"])) {
                 foreach ((array) $v["company_$contactType"] as $val) {
-                    $this->addTextChild($comp, $contactType, $val);
+                    $this->writeTextElement($writer, $contactType, $val);
                 }
             }
         }
-        $this->addTextChild($comp, 'hr-agency', isset($v['hr_agency']) ? ($v['hr_agency'] ? 'true' : 'false') : null);
-        $this->addTextChild($comp, 'contact-name', $v['contact_name'] ?? null);
 
-        $this->addTextChild($node, 'campaign', $v['campaign'] ?? null);
+        $this->writeTextElement(
+            $writer,
+            'hr-agency',
+            array_key_exists('hr_agency', $v) ? $this->booleanText($v['hr_agency']) : null
+        );
+        $this->writeTextElement($writer, 'contact-name', $v['contact_name'] ?? null);
+        $writer->endElement();
+
+        $this->writeTextElement($writer, 'campaign', $v['campaign'] ?? null);
+
+        $writer->endElement();
     }
 
-    private function addTextChild(SimpleXMLElement $parent, string $name, $value): void
+    private function writeAddresses(XMLWriter $writer, array $addresses): void
+    {
+        if (isset($addresses['address'])) {
+            $addresses = [$addresses['address']];
+        } elseif ($this->isSingleAddress($addresses)) {
+            $addresses = [$addresses];
+        }
+
+        $writer->startElement('addresses');
+        foreach ($addresses as $addrData) {
+            if (!is_array($addrData)) {
+                continue;
+            }
+
+            $writer->startElement('address');
+            $this->writeTextElement($writer, 'location', $addrData['location'] ?? null);
+            if (!empty($addrData['metro'])) {
+                foreach ((array) $addrData['metro'] as $m) {
+                    $this->writeTextElement($writer, 'metro', $m);
+                }
+            }
+            $this->writeTextElement($writer, 'lng', $addrData['lng'] ?? null);
+            $this->writeTextElement($writer, 'lat', $addrData['lat'] ?? null);
+            $writer->endElement();
+        }
+        $writer->endElement();
+    }
+
+    private function writeTextElement(XMLWriter $writer, string $name, $value): void
     {
         if ($value !== null && $value !== '') {
-            $parent->addChild($name, htmlspecialchars((string) $value));
+            $writer->startElement($name);
+            $writer->text((string) $value);
+            $writer->endElement();
+        }
+    }
+
+    private function isSingleAddress(array $addresses): bool
+    {
+        return array_intersect(['location', 'metro', 'lng', 'lat'], array_keys($addresses)) !== [];
+    }
+
+    private function booleanText($value): string
+    {
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        if (is_string($value)) {
+            return in_array(strtolower($value), ['1', 'true', 'yes'], true) ? 'true' : 'false';
+        }
+
+        return $value ? 'true' : 'false';
+    }
+
+    private function logSkippedVacancy(array $entity, Exception $exception): void
+    {
+        try {
+            Log::warning('Skipping invalid vacancy for XML feed', [
+                'reason' => $exception->getMessage(),
+                'url' => $entity['url'] ?? null,
+                'job_name' => $entity['job_name'] ?? null,
+            ]);
+        } catch (\RuntimeException) {
+            // Unit contexts may instantiate this service without a Laravel facade root.
+        }
+    }
+
+    private function ensureDirectory(string $filePath): void
+    {
+        $dir = dirname($filePath);
+        if ($dir !== '' && $dir !== '.' && !is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+    }
+
+    private function publishTmpFile(string $tmpPath, string $filePath): void
+    {
+        if (!rename($tmpPath, $filePath)) {
+            if (is_file($filePath)) {
+                unlink($filePath);
+            }
+
+            if (!rename($tmpPath, $filePath)) {
+                throw new Exception("Cannot publish XML file: {$filePath}");
+            }
         }
     }
 }

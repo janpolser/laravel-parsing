@@ -19,6 +19,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        //
+        if ($this->app->runningInConsole()) {
+            ini_set('memory_limit', env('CONSOLE_MEMORY_LIMIT', '512M'));
+        }
     }
 }

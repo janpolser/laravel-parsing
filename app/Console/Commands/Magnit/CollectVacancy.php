@@ -14,6 +14,7 @@ class CollectVacancy extends Command
     protected $description = 'Парсинг вакансий Магнит с устойчивостью и потоковой записью';
 
     private const DETAIL_URL = 'https://rabota.magnit.ru/api/v1/vacancy/';
+    private const DETAIL_CACHE_LIMIT = 200;
 
     private const PROPERTY_VALUE_NAMES = [
         'fullDay' => 'полный день',
@@ -33,11 +34,14 @@ class CollectVacancy extends Command
         $this->info('Начало сбора вакансий Магнит...');
 
         $filePath = 'storage/app/public/magnit/MagnitVacancies' . today() . '.xml';
+        $tmpPath = $filePath . '.tmp';
         $dir = dirname($filePath);
         if (!is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
-        $writer = $this->initXmlWriter($filePath, 'https://rabota.magnit.ru');
+        if (is_file($tmpPath)) {
+            unlink($tmpPath);
+        }
 
         // Запрос локаций
         $this->info('Получение списка локаций...');
@@ -51,100 +55,114 @@ class CollectVacancy extends Command
 
         $this->info('Найдено локаций: ' . count($locations));
 
-        date_default_timezone_set('Europe/Moscow');
-        $date = new DateTime;
+        $writer = $this->initXmlWriter($tmpPath, 'https://rabota.magnit.ru');
 
-        $totalLocations = count($locations);
-        $processedLocations = 0;
-        $totalVacancies = 0;
+        try {
+            date_default_timezone_set('Europe/Moscow');
+            $date = new DateTime;
 
-        // Прогресс-бар для обработки локаций
-        $locationsProgressBar = $this->output->createProgressBar($totalLocations);
-        $locationsProgressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %message%');
-        $locationsProgressBar->setMessage('Обработка локаций...');
-        $locationsProgressBar->start();
+            $totalLocations = count($locations);
+            $processedLocations = 0;
+            $totalVacancies = 0;
 
-        foreach ($locations as $item) {
-            $page = 1;
-            $totalPages = 1; // неизвестно заранее
-            $vacanciesInLocation = 0;
+            // Прогресс-бар для обработки локаций
+            $locationsProgressBar = $this->output->createProgressBar($totalLocations);
+            $locationsProgressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %message%');
+            $locationsProgressBar->setMessage('Обработка локаций...');
+            $locationsProgressBar->start();
 
-            // Прогресс-бар для страниц внутри локации
-            $pagesProgressBar = null;
+            foreach ($locations as $item) {
+                $page = 1;
+                $vacanciesInLocation = 0;
 
-            do {
-                $url = 'https://rabota.magnit.ru/api/v1/vacancy?locality_id[]=' . $item['id'] .
-                    '&overview=list&per_page=500&page=' . $page;
+                // Прогресс-бар для страниц внутри локации
+                $pagesProgressBar = null;
 
-                $vacancyResponse = $this->safeRequest($url);
+                do {
+                    $url = 'https://rabota.magnit.ru/api/v1/vacancy?locality_id[]=' . $item['id'] .
+                        '&overview=list&per_page=500&page=' . $page;
 
-                if (!$vacancyResponse || !isset($vacancyResponse['results']) || !is_array($vacancyResponse['results'])) {
-                    break;
-                }
+                    $vacancyResponse = $this->safeRequest($url);
 
-                // Создаем прогресс-бар для страниц при первой итерации
-                if ($page === 1) {
-                    $totalPages = $vacancyResponse['pagination']['total_pages'] ?? 1;
-                    $pagesProgressBar = $this->output->createProgressBar($totalPages);
-                    $pagesProgressBar->setFormat('  Страница %current%/%max% [%bar%] %percent:3s%%');
-                    $pagesProgressBar->start();
-                }
-
-                foreach ($vacancyResponse['results'] as $vacancy) {
-                    if (!empty($vacancy['active'])) {
-                        $detail = $this->fetchVacancyDetail((string)($vacancy['id'] ?? ''));
-                        if (!empty($detail)) {
-                            $vacancy = array_replace($vacancy, $detail);
-                        }
-
-                        $this->writeVacancyXml($writer, $this->mapVacancyToFeed($vacancy, $item, $date));
-                        $vacanciesInLocation++;
-                        $totalVacancies++;
+                    if (!$vacancyResponse || !isset($vacancyResponse['results']) || !is_array($vacancyResponse['results'])) {
+                        break;
                     }
-                }
 
-                // Обновляем прогресс-бар страниц
+                    // Создаем прогресс-бар для страниц при первой итерации
+                    if ($page === 1) {
+                        $totalPages = $vacancyResponse['pagination']['total_pages'] ?? 1;
+                        $pagesProgressBar = $this->output->createProgressBar($totalPages);
+                        $pagesProgressBar->setFormat('  Страница %current%/%max% [%bar%] %percent:3s%%');
+                        $pagesProgressBar->start();
+                    }
+
+                    foreach ($vacancyResponse['results'] as $vacancy) {
+                        if (!empty($vacancy['active'])) {
+                            $detail = $this->fetchVacancyDetail((string)($vacancy['id'] ?? ''));
+                            if (!empty($detail)) {
+                                $vacancy = array_replace($vacancy, $detail);
+                            }
+
+                            $this->writeVacancyXml($writer, $this->mapVacancyToFeed($vacancy, $item, $date));
+                            $vacanciesInLocation++;
+                            $totalVacancies++;
+                        }
+                    }
+
+                    // Обновляем прогресс-бар страниц
+                    if ($pagesProgressBar) {
+                        $pagesProgressBar->advance();
+                    }
+
+                    $hasNextPage = false;
+                    if (isset($vacancyResponse['next']) && !empty($vacancyResponse['next'])) {
+                        $hasNextPage = true;
+                    } elseif (isset($vacancyResponse['pagination']) &&
+                        $page < $vacancyResponse['pagination']['total_pages']) {
+                        $hasNextPage = true;
+                    } elseif (count($vacancyResponse['results']) == 500) {
+                        $hasNextPage = true;
+                    }
+
+                    unset($vacancyResponse);
+                    gc_collect_cycles();
+
+                    $page++;
+
+                } while ($hasNextPage);
+
+                // Завершаем прогресс-бар страниц для текущей локации
                 if ($pagesProgressBar) {
-                    $pagesProgressBar->advance();
+                    $pagesProgressBar->finish();
+                    $pagesProgressBar->clear();
+                    $this->line("  Найдено вакансий в локации '{$item['name']}': {$vacanciesInLocation}");
                 }
 
-                $hasNextPage = false;
-                if (isset($vacancyResponse['next']) && !empty($vacancyResponse['next'])) {
-                    $hasNextPage = true;
-                } elseif (isset($vacancyResponse['pagination']) &&
-                    $page < $vacancyResponse['pagination']['total_pages']) {
-                    $hasNextPage = true;
-                } elseif (count($vacancyResponse['results']) == 500) {
-                    $hasNextPage = true;
-                }
-
-                $page++;
-
-            } while ($hasNextPage);
-
-            // Завершаем прогресс-бар страниц для текущей локации
-            if ($pagesProgressBar) {
-                $pagesProgressBar->finish();
-                $pagesProgressBar->clear();
-                $this->line("  Найдено вакансий в локации '{$item['name']}': {$vacanciesInLocation}");
+                // Обновляем основной прогресс-бар
+                $processedLocations++;
+                $locationsProgressBar->setMessage("Обработано вакансий: " . $totalVacancies);
+                $locationsProgressBar->advance();
             }
 
-            // Обновляем основной прогресс-бар
-            $processedLocations++;
-            $locationsProgressBar->setMessage("Обработано вакансий: " . $totalVacancies);
-            $locationsProgressBar->advance();
+            $locationsProgressBar->finish();
+            $locationsProgressBar->clear();
+
+            $this->info(PHP_EOL . 'Обработка локаций завершена.');
+            $this->info('Всего собрано вакансий: ' . $totalVacancies);
+
+            $this->finishXmlWriter($writer);
+            $this->publishTmpFile($tmpPath, $filePath);
+            $this->info('Готово! XML файл сохранен: ' . $filePath);
+
+            return 0;
+        } catch (\Throwable $e) {
+            $writer->flush();
+            if (is_file($tmpPath)) {
+                unlink($tmpPath);
+            }
+
+            throw $e;
         }
-
-        $locationsProgressBar->finish();
-        $locationsProgressBar->clear();
-
-        $this->info(PHP_EOL . 'Обработка локаций завершена.');
-        $this->info('Всего собрано вакансий: ' . $totalVacancies);
-
-        $this->finishXmlWriter($writer);
-        $this->info('Готово! XML файл сохранен: ' . $filePath);
-
-        return 0;
     }
 
     private function initXmlWriter(string $filePath, string $hostName): \XMLWriter
@@ -166,6 +184,19 @@ class CollectVacancy extends Command
         $writer->endElement(); // source
         $writer->endDocument();
         $writer->flush();
+    }
+
+    private function publishTmpFile(string $tmpPath, string $filePath): void
+    {
+        if (!rename($tmpPath, $filePath)) {
+            if (is_file($filePath)) {
+                unlink($filePath);
+            }
+
+            if (!rename($tmpPath, $filePath)) {
+                throw new \RuntimeException("Не удалось опубликовать XML файл: {$filePath}");
+            }
+        }
     }
 
     private function writeVacancyXml(\XMLWriter $writer, array $v): void
@@ -275,8 +306,13 @@ class CollectVacancy extends Command
 
         $response = $this->safeRequest(self::DETAIL_URL . rawurlencode($id), 3, 1);
         $detail = $response['results'] ?? [];
+        $detail = is_array($detail) ? $detail : [];
 
-        return $this->detailCache[$id] = is_array($detail) ? $detail : [];
+        if (count($this->detailCache) >= self::DETAIL_CACHE_LIMIT) {
+            array_shift($this->detailCache);
+        }
+
+        return $this->detailCache[$id] = $detail;
     }
 
     private function mapVacancyToFeed(array $vacancy, array $location, DateTime $date): array
