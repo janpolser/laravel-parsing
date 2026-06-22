@@ -7,6 +7,7 @@ services:
     working_dir: /var/www
     volumes:
       - .:/var/www
+      - ./docker/php/conf.d/project.ini:/usr/local/etc/php/conf.d/zz-project.ini:ro
       - composer-cache:/tmp/composer-cache
     environment:
       APP_ENV: ${APP_ENV:-local}
