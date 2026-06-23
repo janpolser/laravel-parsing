@@ -697,7 +697,7 @@ class CollectVacancies extends Command
     public function handle()
     {
         $outfile = (string) $this->option('outfile');
-        $xmlPath = storage_path('app/public/kuper/' . $outfile . today() . '.xml');
+        $xmlPath = storage_path('app/public/kuper/' . $outfile . today()->toDateString() . '.xml');
 
         $this->info('Генерирую вакансии Купер по городам...');
 

@@ -40,7 +40,7 @@ class CollectWbVacancies extends Command
         $limit       = (int) $this->option('limit');
         $offset      = (int) $this->option('start-offset');
         $maxPages    = (int) $this->option('max-pages');
-        $outFileName = (string) $this->option('outfile') . today() . '.xml';
+        $outFileName = (string) $this->option('outfile') . today()->toDateString() . '.xml';
 
         if ($limit < 1 || $limit > 1000) {
             $this->error('Параметр --limit должен быть в диапазоне 1..1000');

@@ -42,7 +42,7 @@ class CollectVacancies extends Command
 
     public function handle(): int
     {
-        $outFileName = (string)$this->option('outfile') . today() . '.xml';
+        $outFileName = (string)$this->option('outfile') . today()->toDateString() . '.xml';
 
         $this->info('Запрос для получения общего количества вакансий...');
         $countResponse = $this->sendVacancyRequest(1, 1);

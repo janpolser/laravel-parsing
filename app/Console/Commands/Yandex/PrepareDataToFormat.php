@@ -93,7 +93,7 @@ class PrepareDataToFormat extends Command
         $this->comment('📝 Создание XML фида...');
         $xmlCreationStart = microtime(true);
 
-        $xml->createXmlFeed($preparedVacancies, 'crowd.yandex.ru', 'storage/app/public/yandex/YandexVacancies' . today() . '.xml');
+        $xml->createXmlFeed($preparedVacancies, 'crowd.yandex.ru', 'storage/app/public/yandex/YandexVacancies' . today()->toDateString() . '.xml');
 
         $xmlCreationEnd = microtime(true);
         $xmlCreationTime = round($xmlCreationEnd - $xmlCreationStart, 2);

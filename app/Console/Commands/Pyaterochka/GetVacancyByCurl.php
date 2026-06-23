@@ -158,7 +158,7 @@ class GetVacancyByCurl extends Command
                 }
             }
 
-            $xml->createXmlFeed($editedVacancies, 'https://rabota5ka.ru/', 'storage/app/public/5ka/5ka' . today() . '.xml');
+            $xml->createXmlFeed($editedVacancies, 'https://rabota5ka.ru/', 'storage/app/public/5ka/5ka' . today()->toDateString() . '.xml');
 
             $this->info("✅ Готово! Обработано вакансий: " . count($editedVacancies));
 

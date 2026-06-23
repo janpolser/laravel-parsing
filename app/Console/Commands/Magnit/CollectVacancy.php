@@ -33,7 +33,7 @@ class CollectVacancy extends Command
     {
         $this->info('Начало сбора вакансий Магнит...');
 
-        $filePath = 'storage/app/public/magnit/MagnitVacancies' . today() . '.xml';
+        $filePath = 'storage/app/public/magnit/MagnitVacancies' . today()->toDateString() . '.xml';
         $tmpPath = $filePath . '.tmp';
         $dir = dirname($filePath);
         if (!is_dir($dir)) {
@@ -55,6 +55,11 @@ class CollectVacancy extends Command
 
         $this->info('Найдено локаций: ' . count($locations));
 
+        $locationsById = [];
+        foreach ($locations as $location) {
+            $locationsById[(int) $location['id']] = $location;
+        }
+
         $writer = $this->initXmlWriter($tmpPath, 'https://rabota.magnit.ru');
 
         try {
@@ -64,6 +69,9 @@ class CollectVacancy extends Command
             $totalLocations = count($locations);
             $processedLocations = 0;
             $totalVacancies = 0;
+            $skippedDuplicateVacancies = 0;
+            $skippedWithoutLocation = 0;
+            $seenVacancyIds = [];
 
             // Прогресс-бар для обработки локаций
             $locationsProgressBar = $this->output->createProgressBar($totalLocations);
@@ -98,12 +106,28 @@ class CollectVacancy extends Command
 
                     foreach ($vacancyResponse['results'] as $vacancy) {
                         if (!empty($vacancy['active'])) {
-                            $detail = $this->fetchVacancyDetail((string)($vacancy['id'] ?? ''));
+                            $vacancyId = (string)($vacancy['id'] ?? '');
+                            if ($vacancyId !== '' && isset($seenVacancyIds[$vacancyId])) {
+                                $skippedDuplicateVacancies++;
+                                continue;
+                            }
+
+                            $detail = $this->fetchVacancyDetail($vacancyId);
                             if (!empty($detail)) {
                                 $vacancy = array_replace($vacancy, $detail);
                             }
 
-                            $this->writeVacancyXml($writer, $this->mapVacancyToFeed($vacancy, $item, $date));
+                            if ($vacancyId !== '') {
+                                $seenVacancyIds[$vacancyId] = true;
+                            }
+
+                            $feedVacancy = $this->mapVacancyToFeed($vacancy, $item, $date, $locationsById);
+                            if ($feedVacancy === null) {
+                                $skippedWithoutLocation++;
+                                continue;
+                            }
+
+                            $this->writeVacancyXml($writer, $feedVacancy);
                             $vacanciesInLocation++;
                             $totalVacancies++;
                         }
@@ -149,6 +173,8 @@ class CollectVacancy extends Command
 
             $this->info(PHP_EOL . 'Обработка локаций завершена.');
             $this->info('Всего собрано вакансий: ' . $totalVacancies);
+            $this->info('Пропущено дублей вакансий: ' . $skippedDuplicateVacancies);
+            $this->info('Пропущено вакансий без адреса/локации: ' . $skippedWithoutLocation);
 
             $this->finishXmlWriter($writer);
             $this->publishTmpFile($tmpPath, $filePath);
@@ -315,9 +341,15 @@ class CollectVacancy extends Command
         return $this->detailCache[$id] = $detail;
     }
 
-    private function mapVacancyToFeed(array $vacancy, array $location, DateTime $date): array
+    private function mapVacancyToFeed(array $vacancy, array $location, DateTime $date, array $locationsById = []): ?array
     {
-        $url = 'https://rabota.magnit.ru/' . ($location['slug'] ?? '') . '/vacancy/' . ($vacancy['id'] ?? '');
+        $address = $this->vacancyAddress($vacancy);
+        $feedLocation = $this->resolveFeedLocation($vacancy, $location, $locationsById, $address);
+        if ($address === null || $feedLocation === null || empty($feedLocation['slug'])) {
+            return null;
+        }
+
+        $url = 'https://rabota.magnit.ru/' . $feedLocation['slug'] . '/vacancy/' . ($vacancy['id'] ?? '');
         $requirements = $this->composeRequirementText($vacancy);
         $conditions = $this->composeConditionText($vacancy);
 
@@ -345,7 +377,7 @@ class CollectVacancy extends Command
             ]),
             'addresses' => [
                 'address' => [
-                    'location' => $vacancy['address'] ?? '',
+                    'location' => $address,
                     'lng' => $vacancy['longitude'] ?? $vacancy['basic_longitude'] ?? null,
                     'lat' => $vacancy['latitude'] ?? $vacancy['basic_latitude'] ?? null,
                 ],
@@ -355,6 +387,39 @@ class CollectVacancy extends Command
             'company_site' => 'https://rabota.magnit.ru',
             'hr_agency' => false,
         ];
+    }
+
+    private function resolveFeedLocation(array $vacancy, array $fallbackLocation, array $locationsById, ?string $address): ?array
+    {
+        $localityId = $vacancy['locality']['id'] ?? null;
+        if ($localityId !== null && isset($locationsById[(int) $localityId])) {
+            return $locationsById[(int) $localityId];
+        }
+
+        if ($address !== null && !empty($fallbackLocation['slug'])) {
+            return $fallbackLocation;
+        }
+
+        return null;
+    }
+
+    private function vacancyAddress(array $vacancy): ?string
+    {
+        $address = $this->normalizeText($vacancy['address'] ?? null);
+        if ($address !== null && $address !== '') {
+            return $address;
+        }
+
+        if (!empty($vacancy['locality']) && is_array($vacancy['locality'])) {
+            $name = $this->normalizeText($vacancy['locality']['name'] ?? null);
+            if ($name !== null && $name !== '') {
+                $type = $this->normalizeText($vacancy['locality']['type'] ?? null);
+
+                return $type ? $type . ' ' . $name : $name;
+            }
+        }
+
+        return null;
     }
 
     private function composeDescription(array $vacancy): ?string
