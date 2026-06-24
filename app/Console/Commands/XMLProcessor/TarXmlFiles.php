@@ -7,19 +7,40 @@ use Illuminate\Support\Facades\File;
 
 class TarXmlFiles extends Command
 {
-    protected $signature = 'xml:tar';
+    protected $signature = 'xml:tar {source? : Optional source folder to process}';
 
     protected $description = 'Создает TAR архив из XML файлов. Новый архив кладется в latest, старый переносится выше';
 
     public function handle()
     {
         ini_set('memory_limit', '4G');
-        $this->process('storage/app/public/5ka', '5ka');
-        $this->process('storage/app/public/kuper', 'kuper');
-        $this->process('storage/app/public/magnit', 'magnit');
-        $this->process('storage/app/public/rzhd', 'rzhd');
-        $this->process('storage/app/public/wb', 'wb');
-        $this->process('storage/app/public/yandex', 'yandex');
+        $sources = [
+            '5ka' => 'storage/app/public/5ka',
+            'kuper' => 'storage/app/public/kuper',
+            'magnit' => 'storage/app/public/magnit',
+            'rzhd' => 'storage/app/public/rzhd',
+            'wb' => 'storage/app/public/wb',
+            'yandex' => 'storage/app/public/yandex',
+            'gossluzhba' => 'storage/app/public/gossluzhba',
+        ];
+
+        $source = $this->argument('source');
+        if ($source !== null) {
+            $source = (string) $source;
+            if (!isset($sources[$source])) {
+                $this->error("Unknown source: {$source}");
+
+                return 1;
+            }
+
+            $this->process($sources[$source], $source);
+
+            return 0;
+        }
+
+        foreach ($sources as $prefix => $folder) {
+            $this->process($folder, $prefix);
+        }
 
         return 0;
     }
@@ -28,6 +49,7 @@ class TarXmlFiles extends Command
     {
         if (!File::exists($folder)) {
             $this->error("Папка {$folder} не существует!");
+
             return 1;
         }
 
@@ -38,23 +60,24 @@ class TarXmlFiles extends Command
             File::makeDirectory($latestDir, 0755, true);
         }
 
-        // Переносим старые архивы из latest на уровень выше
+        // Получаем XML файлы
+        $xmlFiles = File::glob($folder . '/*.xml');
+
+        if (empty($xmlFiles)) {
+            $this->info("В папке {$folder} нет XML файлов.");
+
+            return 0;
+        }
+
+        $this->info('Найдено ' . count($xmlFiles) . " XML файлов в {$folder}");
+
+        // Переносим старые архивы из latest на уровень выше только когда есть новый XML
         $oldArchives = File::glob($latestDir . '/*.tar');
         foreach ($oldArchives as $oldArchive) {
             $destination = $folder . '/' . basename($oldArchive);
             File::move($oldArchive, $destination);
             $this->line('Перенесен старый архив: ' . basename($oldArchive));
         }
-
-        // Получаем XML файлы
-        $xmlFiles = File::glob($folder . '/*.xml');
-
-        if (empty($xmlFiles)) {
-            $this->info("В папке {$folder} нет XML файлов.");
-            return 0;
-        }
-
-        $this->info("Найдено " . count($xmlFiles) . " XML файлов в {$folder}");
 
         $tarFileName = $prefix . date('Y-m-d_His') . '.tar';
         $tarPath = $latestDir . '/' . $tarFileName;
@@ -90,8 +113,8 @@ class TarXmlFiles extends Command
         }
 
         $this->info("✓ TAR архив создан: {$tarPath}");
-        $this->info("✓ Исходные XML удалены");
-        $this->info("✓ Размер архива: " . filesize($tarPath) . " байт");
+        $this->info('✓ Исходные XML удалены');
+        $this->info('✓ Размер архива: ' . filesize($tarPath) . ' байт');
 
         return 0;
     }
@@ -102,7 +125,7 @@ class TarXmlFiles extends Command
             $filename = substr($filename, -100);
         }
 
-        $header  = str_pad($filename, 100, "\0");
+        $header = str_pad($filename, 100, "\0");
         $header .= str_pad(decoct(0644), 7, '0', STR_PAD_LEFT) . "\0";
         $header .= str_pad(decoct(0), 7, '0', STR_PAD_LEFT) . "\0";
         $header .= str_pad(decoct(0), 7, '0', STR_PAD_LEFT) . "\0";

@@ -63,6 +63,11 @@ Schedule::command('kuper:collect-vacancies')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
+// Gossluzhba
+Schedule::command('gossluzhba:collect-vacancies')
+    ->dailyAt('07:00')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->withoutOverlapping();
 
 // Создание архивов
 Schedule::command('xml:tar')
