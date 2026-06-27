@@ -79,7 +79,7 @@ class TarXmlFiles extends Command
             $this->line('Перенесен старый архив: ' . basename($oldArchive));
         }
 
-        $tarFileName = $prefix . date('Y-m-d_His') . '.tar';
+        $tarFileName = $prefix . now('Europe/Moscow')->format('Y-m-d_His') . '.tar';
         $tarPath = $latestDir . '/' . $tarFileName;
 
         $tarHandle = fopen($tarPath, 'x+');

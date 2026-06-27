@@ -17,6 +17,10 @@ class CollectVacancies extends Command
 
     private const DETAIL_URL = self::BASE_URL . '/api/vacancy/data/';
 
+    private const CLIENT_CONFIG_URL = self::BASE_URL . '/api/config/client/private-get';
+
+    private const DEFAULT_FILE_STORAGE_DOWNLOAD_URL = 'https://files.gossluzhba.gov.ru/49309a89-3c66-408c-805a-2d42b28e89c9/download/';
+
     private const HOST = 'gossluzhba.gov.ru';
 
     private const TIMEZONE = 'Europe/Moscow';
@@ -25,12 +29,13 @@ class CollectVacancies extends Command
         {--outfile=GossluzhbaVacancies : Base XML file name without date and extension}
         {--page-size=1000 : List API page size}
         {--max-pages=0 : Max list pages to fetch, 0 means all pages}
-        {--details-limit=400 : Max detail API requests per run, 0 means no limit}
+        {--details-limit=0 : Max detail API requests per run, 0 means no limit}
         {--sleep-ms=1500 : Delay between detail requests, ms}
         {--list-sleep-ms=500 : Delay between list page requests, ms}
-        {--refresh-days=7 : Refresh cached details after N days}
+        {--refresh-days=30 : Refresh cached details after N days}
         {--region= : Optional okatoregion UUID filter}
         {--area= : Optional okatoarea UUID filter}
+        {--allow-summary-fallback : Write summary-only vacancies when detail is not available}
         {--without-tls-verify : Disable TLS verification for local debugging only}';
 
     protected $description = 'Collects gossluzhba.gov.ru vacancies and writes Yandex-compatible XML in a streaming mode.';
@@ -38,6 +43,8 @@ class CollectVacancies extends Command
     private int $detailRequests = 0;
 
     private array $state = [];
+
+    private string $fileStorageDownloadUrl = self::DEFAULT_FILE_STORAGE_DOWNLOAD_URL;
 
     public function handle(): int
     {
@@ -47,11 +54,14 @@ class CollectVacancies extends Command
         $sleepMs = max(0, (int) $this->option('sleep-ms'));
         $listSleepMs = max(0, (int) $this->option('list-sleep-ms'));
         $refreshDays = max(1, (int) $this->option('refresh-days'));
+        $allowSummaryFallback = (bool) $this->option('allow-summary-fallback');
         $filters = $this->requestFilters();
 
         $this->state = $this->loadState();
+        $this->fileStorageDownloadUrl = $this->fetchFileStorageDownloadUrl()
+            ?? self::DEFAULT_FILE_STORAGE_DOWNLOAD_URL;
 
-        $outFileName = (string) $this->option('outfile') . today()->toDateString() . '.xml';
+        $outFileName = (string) $this->option('outfile') . Carbon::now(self::TIMEZONE)->toDateString() . '.xml';
         $outPath = storage_path('app/public/gossluzhba/' . $outFileName);
         $tmpPath = $outPath . '.tmp';
 
@@ -63,15 +73,17 @@ class CollectVacancies extends Command
         $writer = $this->openWriter($tmpPath);
         $written = 0;
         $skipped = 0;
+        $missingDetails = 0;
         $page = 1;
         $pageCount = null;
         $seenIds = [];
 
         $this->info(sprintf(
-            'Start gossluzhba parser: page_size=%d, details_limit=%d, detail_delay=%dms',
+            'Start gossluzhba parser: page_size=%d, details_limit=%d, detail_delay=%dms, allow_summary_fallback=%s',
             $pageSize,
             $detailsLimit,
-            $sleepMs
+            $sleepMs,
+            $allowSummaryFallback ? 'yes' : 'no'
         ));
 
         try {
@@ -122,6 +134,17 @@ class CollectVacancies extends Command
                         $refreshDays
                     );
 
+                    if (empty($detail) && !$allowSummaryFallback) {
+                        $missingDetails++;
+                        $skipped++;
+                        Log::warning('Skipping gossluzhba vacancy without detail payload', [
+                            'id' => $id,
+                            'summary_hash' => $summaryHash,
+                        ]);
+
+                        continue;
+                    }
+
                     $entity = $this->mapToEntity($summary, $detail);
                     if (!$this->isValidEntity($entity)) {
                         $skipped++;
@@ -144,6 +167,11 @@ class CollectVacancies extends Command
 
                     if ($written % 100 === 0) {
                         $writer->flush();
+                        $this->line(sprintf(
+                            'Written %d vacancies, detail_requests=%d',
+                            $written,
+                            $this->detailRequests
+                        ));
                     }
                 }
 
@@ -162,10 +190,11 @@ class CollectVacancies extends Command
             $this->writeState($this->state);
 
             $this->info(sprintf(
-                'XML generated: %s, vacancies=%d, skipped=%d, detail_requests=%d',
+                'XML generated: %s, vacancies=%d, skipped=%d, missing_details=%d, detail_requests=%d',
                 $outPath,
                 $written,
                 $skipped,
+                $missingDetails,
                 $this->detailRequests
             ));
 
@@ -275,6 +304,23 @@ class CollectVacancies extends Command
         return is_array($vacancy) ? $vacancy : [];
     }
 
+    private function fetchFileStorageDownloadUrl(): ?string
+    {
+        $response = $this->sendJsonRequest('get', self::CLIENT_CONFIG_URL);
+        if ($response === null) {
+            return null;
+        }
+
+        $json = $response->json();
+        if (!is_array($json)) {
+            return null;
+        }
+
+        $url = $this->cleanText($json['fileStorageDownloadUrl'] ?? null);
+
+        return $url ? rtrim($url, '/') . '/' : null;
+    }
+
     private function sendJsonRequest(string $method, string $url, array $payload = []): ?Response
     {
         $maxRetries = 3;
@@ -339,10 +385,11 @@ class CollectVacancies extends Command
         $id = $this->normalizeId($summary['id'] ?? $detail['id'] ?? null) ?? '';
         $url = self::BASE_URL . '/vacancy/' . $id;
         $title = $this->cleanText($detail['caption'] ?? $detail['position'] ?? $summary['caption'] ?? '');
-        $company = $this->cleanText($detail['organizationName'] ?? $summary['organizationName'] ?? $detail['employerName'] ?? '');
+        $company = $this->resolveCompanyName($summary, $detail);
         $createdAt = $this->formatDate($detail['announcementDate'] ?? $summary['announcementDate'] ?? null);
         $updatedAt = $this->formatDate($detail['announcementDate'] ?? $summary['announcementDate'] ?? null);
         $description = $this->composeDescription($summary, $detail);
+        $duty = $this->composeDutyText($detail);
 
         $phones = $this->collectPhones($detail);
         $address = $this->firstNonEmpty([
@@ -373,10 +420,10 @@ class CollectVacancies extends Command
             'job_name' => $title,
             'schedule' => $this->cleanText($detail['workScheduleName'] ?? null),
             'description' => $description,
-            'duty' => $this->composeList($this->collectTextItems($detail['jobResponsibilities'] ?? null)),
+            'duty' => $duty,
             'term' => array_filter([
                 'contract' => $this->cleanText($detail['isIndefiniteContractTerm'] ?? null) === '1' ? 'indefinite' : null,
-                'text' => $this->cleanText($detail['socialPackage'] ?? null),
+                'text' => $this->composeTermText($detail),
             ], fn ($value) => $this->hasValue($value)),
             'requirement' => array_filter([
                 'education' => $this->cleanText($detail['educationLevelName'] ?? null),
@@ -399,7 +446,7 @@ class CollectVacancies extends Command
             'company_phone' => $phones,
             'hr_agency' => false,
             'contact_name' => $this->cleanText($detail['contactPerson'] ?? null),
-            'campaign' => trim($company . ' ' . $id),
+            'campaign' => $company,
         ];
 
         return array_filter($entity, fn ($value) => $this->hasValue($value));
@@ -410,43 +457,18 @@ class CollectVacancies extends Command
         $parts = [];
 
         $summaryText = $this->composeList([
+            $detail['workTypeName'] ?? null,
             $summary['jobTypeName'] ?? null,
+            $detail['okatoRegionName'] ?? $summary['regionName'] ?? null,
+            $detail['okatoAreaName'] ?? $summary['areaName'] ?? null,
             $summary['departmentName'] ?? null,
             $summary['positionCategoryName'] ?? null,
             $summary['positionGroupName'] ?? null,
-            $summary['governmentExperienceName'] ?? null,
-            $summary['registrationAddress'] ?? null,
-            $summary['fullAddress'] ?? null,
+            $detail['profile'] ?? null,
+            $detail['workPlaceAddress'] ?? $summary['fullAddress'] ?? null,
         ]);
         if ($summaryText) {
             $parts[] = $summaryText;
-        }
-
-        foreach ([
-            'additionalInformationAboutPosition',
-            'additionalInformation',
-            'socialPackage',
-            'workScheduleName',
-            'registrationTime',
-        ] as $field) {
-            $text = $this->cleanText($detail[$field] ?? null);
-            if ($text !== null && $text !== '') {
-                $parts[] = $text;
-            }
-        }
-
-        $responsibilities = $this->composeList($this->collectTextItems($detail['jobResponsibilities'] ?? null));
-        if ($responsibilities) {
-            $parts[] = $responsibilities;
-        }
-
-        $requirements = $this->composeList(array_merge(
-            $this->collectTextItems($detail['qualificationRequirements'] ?? null),
-            $this->collectTextItems($detail['knowledgeRequirements'] ?? null),
-            $this->collectTextItems($detail['skillRequirements'] ?? null)
-        ));
-        if ($requirements) {
-            $parts[] = $requirements;
         }
 
         $description = $this->normalizeMultilineText(implode("\n\n", array_unique(array_filter($parts))));
@@ -454,6 +476,125 @@ class CollectVacancies extends Command
         return $description !== ''
             ? $description
             : 'Actual vacancy from gossluzhba.gov.ru. See source URL for details.';
+    }
+
+    private function composeDutyText(array $detail): ?string
+    {
+        return $this->composeList(array_merge(
+            $this->collectTextItems($detail['jobResponsibilities'] ?? null),
+            $this->collectTextItems($detail['jobResponsibilitiyFromVacancy'] ?? null)
+        ));
+    }
+
+    private function composeTermText(array $detail): ?string
+    {
+        $parts = [];
+
+        foreach ([
+            'additionalInformationAboutPosition' => 'Дополнительная информация о должности',
+            'workScheduleName' => 'График работы',
+            'businessTripName' => 'Командировки',
+            'socialPackage' => 'Социальный пакет',
+            'additionalInformation' => 'Дополнительная информация',
+        ] as $field => $label) {
+            $text = $this->cleanText($detail[$field] ?? null);
+            if ($text !== null && $text !== '') {
+                $parts[] = $label.': '.$text;
+            }
+        }
+
+        $documentsReception = $this->composeDocumentsReceptionText($detail);
+        if ($documentsReception) {
+            $parts[] = $documentsReception;
+        }
+
+        $attachmentLinks = $this->composeAttachmentLinks($detail);
+        if ($attachmentLinks) {
+            $parts[] = "Документы:\n".$attachmentLinks;
+        }
+
+        return $this->composeList($parts);
+    }
+
+    private function composeDocumentsReceptionText(array $detail): ?string
+    {
+        $parts = [];
+
+        $registrationAddress = $this->cleanText($detail['registrationAddress'] ?? null);
+        if ($registrationAddress) {
+            $parts[] = 'Адрес приема документов: '.$registrationAddress;
+        }
+
+        $registrationTime = $this->cleanText($detail['registrationTime'] ?? null);
+        if ($registrationTime) {
+            $parts[] = 'Время приема документов: '.$registrationTime;
+        }
+
+        if (array_key_exists('isElectronicForm', $detail)) {
+            $parts[] = 'Электронная форма подачи документов: '.($detail['isElectronicForm'] ? 'да' : 'нет');
+        }
+
+        return $this->composeList($parts);
+    }
+
+    private function composeAttachmentLinks(array $detail): ?string
+    {
+        $fields = [
+            'positionRuleAttachments' => 'Должностной регламент',
+            'socialPackageAttachments' => 'Социальный пакет',
+            'additionalInformationAboutPositionAttachments' => 'Дополнительная информация о должности',
+            'additionalInformationAttachments' => 'Документы для участия',
+            'knowledgeAttachments' => 'Требования к знаниям',
+            'evaluationAttachments' => 'Оценочные материалы',
+            'jobResponsibilitiesAttachments' => 'Должностные обязанности',
+            'targetedTrainingSupportInformationAttachments' => 'Меры поддержки',
+            'targetedTrainingTrialTaskDescriptionAttachments' => 'Пробное задание',
+        ];
+
+        $links = [];
+        foreach ($fields as $field => $label) {
+            foreach ($this->collectAttachmentLinks($detail[$field] ?? null, $label) as $link) {
+                $links[] = $link;
+            }
+        }
+
+        $links = array_values(array_unique($links));
+
+        return $links ? implode("\n", $links) : null;
+    }
+
+    private function collectAttachmentLinks(mixed $attachments, string $label): array
+    {
+        if (!is_array($attachments)) {
+            return [];
+        }
+
+        $links = [];
+        foreach ($attachments as $attachment) {
+            if (!is_array($attachment)) {
+                continue;
+            }
+
+            $id = $this->normalizeId($attachment['id'] ?? null);
+            if ($id === null) {
+                continue;
+            }
+
+            $name = $this->cleanText($attachment['originalName'] ?? null) ?: $id;
+            $links[] = $label . ': ' . $name . ' - ' . $this->attachmentDownloadUrl($id);
+        }
+
+        return $links;
+    }
+
+    private function attachmentDownloadUrl(string $id): string
+    {
+        return rtrim($this->fileStorageDownloadUrl, '/') . '/' . rawurlencode($id);
+    }
+
+    private function hasAttachments(mixed $attachments): bool
+    {
+        return is_array($attachments) && !empty($attachments);
     }
 
     private function writeVacancyXml(XMLWriter $writer, array $v): void
@@ -610,6 +751,33 @@ class CollectVacancies extends Command
         }
 
         return $filters;
+    }
+
+    private function resolveCompanyName(array $summary, array $detail): ?string
+    {
+        $company = $this->firstNonEmpty([
+            $detail['organizationName'] ?? null,
+            $summary['organizationName'] ?? null,
+            $detail['employerName'] ?? null,
+        ]);
+
+        if ($company === null) {
+            $organizations = $this->collectTextItems($detail['organizations'] ?? null);
+            $company = !empty($organizations) ? end($organizations) : null;
+        }
+
+        return $company !== null ? $this->stripTrailingUuid($company) : null;
+    }
+
+    private function stripTrailingUuid(string $text): string
+    {
+        $cleaned = preg_replace(
+            '/\s+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu',
+            '',
+            $text
+        );
+
+        return trim($cleaned ?? $text);
     }
 
     private function summaryHash(array $summary): string
@@ -877,6 +1045,7 @@ class CollectVacancies extends Command
 
     private function normalizeMultilineText(string $text): string
     {
+        $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $text) ?? $text;
         $text = str_replace(["\r\n", "\r", "\xC2\xA0", "\u{00A0}", "\u{202F}"], ["\n", "\n", ' ', ' ', ' '], $text);
         $text = preg_replace('/[^\S\n]+/u', ' ', $text) ?? $text;
         $text = preg_replace('/ *\n */u', "\n", $text) ?? $text;
