@@ -328,6 +328,12 @@ class CollectVacancies extends Command
         for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
             try {
                 $request = Http::timeout(35)
+                    ->connectTimeout(15)
+                    ->withOptions([
+                        'curl' => [
+                            CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
+                        ],
+                    ])
                     ->acceptJson()
                     ->withHeaders($this->requestHeaders());
 
