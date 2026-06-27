@@ -46,6 +46,8 @@ class CollectVacancies extends Command
 
     private string $fileStorageDownloadUrl = self::DEFAULT_FILE_STORAGE_DOWNLOAD_URL;
 
+    private ?string $lastRequestError = null;
+
     public function handle(): int
     {
         $pageSize = max(1, (int) $this->option('page-size'));
@@ -95,7 +97,9 @@ class CollectVacancies extends Command
 
                 $list = $this->fetchListPage($page, $pageSize, $filters);
                 if ($list === null) {
-                    throw new \RuntimeException("Cannot fetch list page {$page}");
+                    $reason = $this->lastRequestError ? ': '.$this->lastRequestError : '';
+
+                    throw new \RuntimeException("Cannot fetch list page {$page}{$reason}");
                 }
 
                 $vacancies = $list['vacancies'] ?? [];
@@ -324,6 +328,7 @@ class CollectVacancies extends Command
     private function sendJsonRequest(string $method, string $url, array $payload = []): ?Response
     {
         $maxRetries = 3;
+        $this->lastRequestError = null;
 
         for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
             try {
@@ -345,6 +350,7 @@ class CollectVacancies extends Command
                     ? $request->post($url, $payload)
                     : $request->get($url);
             } catch (\Throwable $e) {
+                $this->lastRequestError = $e->getMessage();
                 Log::warning('Gossluzhba network error', [
                     'url' => $url,
                     'attempt' => $attempt,
@@ -362,8 +368,12 @@ class CollectVacancies extends Command
 
             $status = $response->status();
             if ($response->successful()) {
+                $this->lastRequestError = null;
+
                 return $response;
             }
+
+            $this->lastRequestError = "HTTP {$status}: ".mb_substr($response->body(), 0, 500);
 
             Log::warning('Gossluzhba non-200 response', [
                 'url' => $url,
