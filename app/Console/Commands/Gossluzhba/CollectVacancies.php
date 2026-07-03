@@ -35,6 +35,7 @@ class CollectVacancies extends Command
         {--refresh-days=30 : Refresh cached details after N days}
         {--region= : Optional okatoregion UUID filter}
         {--area= : Optional okatoarea UUID filter}
+        {--proxy=* : Optional HTTP/SOCKS proxy URL, can be repeated}
         {--allow-summary-fallback : Write summary-only vacancies when detail is not available}
         {--without-tls-verify : Disable TLS verification for local debugging only}';
 
@@ -48,6 +49,10 @@ class CollectVacancies extends Command
 
     private ?string $lastRequestError = null;
 
+    private array $proxies = [];
+
+    private int $proxyCursor = 0;
+
     public function handle(): int
     {
         $pageSize = max(1, (int) $this->option('page-size'));
@@ -58,6 +63,7 @@ class CollectVacancies extends Command
         $refreshDays = max(1, (int) $this->option('refresh-days'));
         $allowSummaryFallback = (bool) $this->option('allow-summary-fallback');
         $filters = $this->requestFilters();
+        $this->proxies = $this->resolveProxies();
 
         $this->state = $this->loadState();
         $this->fileStorageDownloadUrl = $this->fetchFileStorageDownloadUrl()
@@ -81,10 +87,11 @@ class CollectVacancies extends Command
         $seenIds = [];
 
         $this->info(sprintf(
-            'Start gossluzhba parser: page_size=%d, details_limit=%d, detail_delay=%dms, allow_summary_fallback=%s',
+            'Start gossluzhba parser: page_size=%d, details_limit=%d, detail_delay=%dms, proxies=%d, allow_summary_fallback=%s',
             $pageSize,
             $detailsLimit,
             $sleepMs,
+            count($this->proxies),
             $allowSummaryFallback ? 'yes' : 'no'
         ));
 
@@ -327,18 +334,16 @@ class CollectVacancies extends Command
 
     private function sendJsonRequest(string $method, string $url, array $payload = []): ?Response
     {
-        $maxRetries = 3;
+        $maxRetries = max(3, count($this->proxies));
         $this->lastRequestError = null;
 
         for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            $proxy = $this->nextProxy();
+
             try {
                 $request = Http::timeout(35)
                     ->connectTimeout(15)
-                    ->withOptions([
-                        'curl' => [
-                            CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
-                        ],
-                    ])
+                    ->withOptions($this->requestOptions($proxy))
                     ->acceptJson()
                     ->withHeaders($this->requestHeaders());
 
@@ -354,6 +359,7 @@ class CollectVacancies extends Command
                 Log::warning('Gossluzhba network error', [
                     'url' => $url,
                     'attempt' => $attempt,
+                    'proxy' => $this->maskProxy($proxy),
                     'message' => $e->getMessage(),
                 ]);
 
@@ -378,11 +384,18 @@ class CollectVacancies extends Command
             Log::warning('Gossluzhba non-200 response', [
                 'url' => $url,
                 'attempt' => $attempt,
+                'proxy' => $this->maskProxy($proxy),
                 'status' => $status,
                 'body_snippet' => mb_substr($response->body(), 0, 500),
             ]);
 
             if ($status === 403 || $status === 429) {
+                if ($this->proxies !== [] && $attempt < $maxRetries) {
+                    $this->sleepBackoff($attempt);
+
+                    continue;
+                }
+
                 throw new GossluzhbaProtectionException("HTTP {$status} for {$url}");
             }
 
@@ -394,6 +407,21 @@ class CollectVacancies extends Command
         }
 
         return null;
+    }
+
+    private function requestOptions(?string $proxy): array
+    {
+        $options = [
+            'curl' => [
+                CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
+            ],
+        ];
+
+        if ($proxy !== null) {
+            $options['proxy'] = $proxy;
+        }
+
+        return $options;
     }
 
     private function mapToEntity(array $summary, array $detail): array
@@ -739,6 +767,103 @@ class CollectVacancies extends Command
         }
 
         return true;
+    }
+
+    private function resolveProxies(): array
+    {
+        $configured = [];
+        $optionProxies = $this->option('proxy');
+
+        if (is_array($optionProxies)) {
+            $configured = array_merge($configured, $optionProxies);
+        } elseif (is_string($optionProxies) && trim($optionProxies) !== '') {
+            $configured[] = $optionProxies;
+        }
+
+        $configured = array_merge(
+            $configured,
+            $this->parseProxyList($this->environmentValue('GOSSLUZHBA_PROXIES'))
+        );
+
+        $proxies = [];
+        foreach ($configured as $proxy) {
+            if (!is_string($proxy)) {
+                continue;
+            }
+
+            $proxy = trim($proxy);
+            if ($proxy === '') {
+                continue;
+            }
+
+            if (!$this->isSupportedProxy($proxy)) {
+                $this->warn('Skipping unsupported proxy: ' . $this->maskProxy($proxy));
+
+                continue;
+            }
+
+            $proxies[$proxy] = $proxy;
+        }
+
+        return array_values($proxies);
+    }
+
+    private function parseProxyList(?string $value): array
+    {
+        if ($value === null || trim($value) === '') {
+            return [];
+        }
+
+        return preg_split('/[\r\n,;]+/', $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    }
+
+    private function environmentValue(string $key): ?string
+    {
+        foreach ([getenv($key), $_ENV[$key] ?? null, $_SERVER[$key] ?? null] as $value) {
+            if (is_string($value) && trim($value) !== '') {
+                return trim($value);
+            }
+        }
+
+        return null;
+    }
+
+    private function isSupportedProxy(string $proxy): bool
+    {
+        $scheme = parse_url($proxy, PHP_URL_SCHEME);
+
+        return is_string($scheme)
+            && in_array(strtolower($scheme), ['http', 'https', 'socks5', 'socks5h'], true);
+    }
+
+    private function nextProxy(): ?string
+    {
+        if ($this->proxies === []) {
+            return null;
+        }
+
+        $proxy = $this->proxies[$this->proxyCursor % count($this->proxies)];
+        $this->proxyCursor++;
+
+        return $proxy;
+    }
+
+    private function maskProxy(?string $proxy): ?string
+    {
+        if ($proxy === null) {
+            return null;
+        }
+
+        $parts = parse_url($proxy);
+        if (!is_array($parts) || empty($parts['host'])) {
+            return '[proxy hidden]';
+        }
+
+        $scheme = isset($parts['scheme']) ? strtolower((string) $parts['scheme']) : 'proxy';
+        $auth = isset($parts['user']) ? '***:***@' : '';
+        $port = isset($parts['port']) ? ':' . $parts['port'] : '';
+
+        return "{$scheme}://{$auth}{$parts['host']}{$port}";
     }
 
     private function requestHeaders(): array
