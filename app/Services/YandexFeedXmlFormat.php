@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\VacancyTextUrls;
 use DateTime;
 use Exception;
 use Illuminate\Support\Facades\Log;
@@ -37,6 +38,7 @@ class YandexFeedXmlFormat
 
             foreach ($entities as $entity) {
                 try {
+                    $entity = VacancyTextUrls::extractFromVacancy($entity);
                     $this->validateVacancy($entity);
                     $this->addVacancyToXml($writer, $entity);
                 } catch (Exception $e) {
@@ -93,6 +95,7 @@ class YandexFeedXmlFormat
         $this->writeTextElement($writer, 'schedule', $v['schedule'] ?? null);
         $this->writeTextElement($writer, 'description', $v['description']);
         $this->writeTextElement($writer, 'duty', $v['duty'] ?? null);
+        $this->writeTextUrls($writer, $v['text_urls'] ?? []);
 
         if (!empty($v['term'])) {
             $writer->startElement('term');
@@ -139,6 +142,20 @@ class YandexFeedXmlFormat
 
         $this->writeTextElement($writer, 'campaign', $v['campaign'] ?? null);
 
+        $writer->endElement();
+    }
+
+    private function writeTextUrls(XMLWriter $writer, array $urls): void
+    {
+        $urls = array_values(array_unique(array_filter($urls, static fn ($url) => $url !== null && $url !== '')));
+        if ($urls === []) {
+            return;
+        }
+
+        $writer->startElement('text-urls');
+        foreach ($urls as $url) {
+            $this->writeTextElement($writer, 'url', $url);
+        }
         $writer->endElement();
     }
 

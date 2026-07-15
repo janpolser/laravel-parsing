@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands\Magnit;
 
+use App\Support\VacancyTextUrls;
 use DateTime;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
@@ -227,6 +228,8 @@ class CollectVacancy extends Command
 
     private function writeVacancyXml(\XMLWriter $writer, array $v): void
     {
+        $v = VacancyTextUrls::extractFromVacancy($v);
+
         $writer->startElement('vacancy');
 
         $this->writeTextElement($writer, 'url', $v['url'] ?? null);
@@ -249,6 +252,7 @@ class CollectVacancy extends Command
         $this->writeTextElement($writer, 'schedule', $v['schedule'] ?? null);
         $this->writeTextElement($writer, 'description', $v['description'] ?? null);
         $this->writeTextElement($writer, 'duty', $v['duty'] ?? null);
+        $this->writeTextUrls($writer, $v['text_urls'] ?? []);
 
         if (!empty($v['term'])) {
             $writer->startElement('term');
@@ -308,6 +312,20 @@ class CollectVacancy extends Command
 
         $this->writeTextElement($writer, 'campaign', $v['campaign'] ?? null);
 
+        $writer->endElement();
+    }
+
+    private function writeTextUrls(\XMLWriter $writer, array $urls): void
+    {
+        $urls = array_values(array_unique(array_filter($urls, static fn ($url) => $url !== null && $url !== '')));
+        if ($urls === []) {
+            return;
+        }
+
+        $writer->startElement('text-urls');
+        foreach ($urls as $url) {
+            $this->writeTextElement($writer, 'url', $url);
+        }
         $writer->endElement();
     }
 

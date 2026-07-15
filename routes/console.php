@@ -64,7 +64,7 @@ Schedule::command('kuper:collect-vacancies')
     ->withoutOverlapping();
 
 // Gossluzhba
-Schedule::command('gossluzhba:collect-vacancies --details-limit=0 --sleep-ms=1500 --refresh-days=30')
+Schedule::command('gossluzhba:collect-vacancies --details-limit=0 --sleep-ms=1500 --refresh-days=30 --without-tls-verify')
     ->dailyAt('07:00')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
