@@ -86,12 +86,7 @@ class CollectVacancies extends Command
 
     private function sendVacancyRequest(int $page, int $perPage)
     {
-        return Http::withHeaders([
-            'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Accept'     => 'application/json, text/plain, */*',
-            'Origin'     => 'https://team.rzd.ru',
-            'Referer'    => 'https://team.rzd.ru/',
-        ])->get(self::BASE_URL, [
+        return $this->rzhdHttpClient()->get(self::BASE_URL, [
             'page'     => $page,
             'per_page' => $perPage,
             'sort'     => 'date_desc',
@@ -149,14 +144,23 @@ class CollectVacancies extends Command
             return $this->detailCache[$id];
         }
 
-        $response = Http::withHeaders([
+        $response = $this->rzhdHttpClient()->get(self::BASE_URL . '/' . $id);
+
+        return $this->detailCache[$id] = $response->ok() ? $response->json() : [];
+    }
+
+    /**
+     * The API currently serves a certificate chain absent from the runtime CA bundle.
+     * Keep the TLS exception scoped to RZD requests until that bundle is updated.
+     */
+    private function rzhdHttpClient()
+    {
+        return Http::withoutVerifying()->withHeaders([
             'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
             'Accept'     => 'application/json, text/plain, */*',
             'Origin'     => 'https://team.rzd.ru',
             'Referer'    => 'https://team.rzd.ru/',
-        ])->get(self::BASE_URL . '/' . $id);
-
-        return $this->detailCache[$id] = $response->ok() ? $response->json() : [];
+        ]);
     }
 
     private function mapToEntity(array $row): array
