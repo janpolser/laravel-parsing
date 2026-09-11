@@ -14,11 +14,6 @@ Schedule::command('yandex:vacancy-yandex')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
-Schedule::command('yandex:prepare-data-to-format')
-    ->dailyAt('07:00')
-    ->appendOutputTo('/proc/1/fd/1')
-    ->withoutOverlapping();
-
 // Пятерочка
 Schedule::command('pyaterochka:vacancy-5ka')
     ->dailyAt('07:00')
