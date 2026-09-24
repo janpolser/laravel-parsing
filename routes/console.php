@@ -58,6 +58,14 @@ Schedule::command('kuper:collect-vacancies')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
+// HireHi
+// The command fetches vacancy details sequentially, so run it before the
+// main morning batch. The generic XML archiver runs at 07:00.
+Schedule::command('hirehi:parse-vacancies')
+    ->dailyAt('04:00')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->withoutOverlapping();
+
 // Gossluzhba
 Schedule::command('gossluzhba:collect-vacancies --details-limit=0 --sleep-ms=1500 --refresh-days=30 --without-tls-verify')
     ->dailyAt('07:00')

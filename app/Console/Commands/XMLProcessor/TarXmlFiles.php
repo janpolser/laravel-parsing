@@ -16,6 +16,7 @@ class TarXmlFiles extends Command
         ini_set('memory_limit', '4G');
         $sources = [
             '5ka' => 'storage/app/public/5ka',
+            'hirehi' => 'storage/app/public/hirehi',
             'kuper' => 'storage/app/public/kuper',
             'magnit' => 'storage/app/public/magnit',
             'rzhd' => 'storage/app/public/rzhd',
