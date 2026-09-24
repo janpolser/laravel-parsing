@@ -779,6 +779,12 @@ class CollectVacancies extends Command
         }
 
         $html = $resp->body();
+        if ($cities = $this->extractCitiesFromNextData($html)) {
+            $this->info('Список городов найден в __NEXT_DATA__.');
+
+            return $cities;
+        }
+
         if (!preg_match_all('/\\/chunks\\/([A-Za-z0-9-]+\\.js)|\\/chunks\\/pages\\/(_app-[A-Za-z0-9-]+\\.js)|\\/rabota\\/(_next\\/static\\/chunks\\/pages\\/_app-[A-Za-z0-9-]+\\.js)/', $html, $matches)) {
             throw new \RuntimeException('Не найден ни один chunk-файл на странице.');
         }
@@ -816,6 +822,53 @@ class CollectVacancies extends Command
         }
 
         throw new \RuntimeException('Не удалось найти список городов в chunk-чанках.');
+    }
+
+    private function extractCitiesFromNextData(string $html): ?array
+    {
+        if (!preg_match(
+            '~<script id="__NEXT_DATA__" type="application/json">(.*?)</script>~s',
+            $html,
+            $match
+        )) {
+            return null;
+        }
+
+        $data = json_decode(
+            html_entity_decode($match[1], ENT_QUOTES | ENT_HTML5, 'UTF-8'),
+            true
+        );
+        if (!is_array($data)) {
+            return null;
+        }
+
+        $cities = [];
+        $collect = function (mixed $value) use (&$collect, &$cities): void {
+            if (!is_array($value)) {
+                return;
+            }
+
+            $city = $value['cityInfo'] ?? null;
+            if (is_array($city)) {
+                $id = $city['id'] ?? null;
+                $name = $city['name'] ?? null;
+                if ((is_string($id) || is_int($id)) && is_string($name) && trim($name) !== '') {
+                    $cities[(string) $id] = [
+                        'name' => trim($name),
+                        'declination' => is_string($city['declination'] ?? null)
+                            ? trim($city['declination'])
+                            : null,
+                    ];
+                }
+            }
+
+            foreach ($value as $child) {
+                $collect($child);
+            }
+        };
+        $collect($data);
+
+        return $cities ?: null;
     }
 
     private function extractCitiesFromChunk(string $chunk): ?array
