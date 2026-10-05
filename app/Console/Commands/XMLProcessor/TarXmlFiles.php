@@ -9,9 +9,9 @@ class TarXmlFiles extends Command
 {
     protected $signature = 'xml:tar {source? : Optional source folder to process}';
 
-    protected $description = 'Создает TAR архив из XML файлов. Новый архив кладется в latest, старый переносится выше';
+    protected $description = 'Создает и атомарно публикует TAR из XML файлов.';
 
-    public function handle()
+    public function handle(): int
     {
         ini_set('memory_limit', '4G');
         $sources = [
@@ -34,24 +34,25 @@ class TarXmlFiles extends Command
                 return 1;
             }
 
-            $this->process($sources[$source], $source);
-
-            return 0;
+            return $this->process($sources[$source], $source);
         }
 
+        $exitCode = self::SUCCESS;
         foreach ($sources as $prefix => $folder) {
-            $this->process($folder, $prefix);
+            if ($this->process($folder, $prefix) !== self::SUCCESS) {
+                $exitCode = self::FAILURE;
+            }
         }
 
-        return 0;
+        return $exitCode;
     }
 
-    private function process(string $folder, string $prefix)
+    private function process(string $folder, string $prefix): int
     {
         if (!File::exists($folder)) {
             $this->error("Папка {$folder} не существует!");
 
-            return 1;
+            return self::FAILURE;
         }
 
         $latestDir = $folder . '/latest';
@@ -67,57 +68,173 @@ class TarXmlFiles extends Command
         if (empty($xmlFiles)) {
             $this->info("В папке {$folder} нет XML файлов.");
 
-            return 0;
+            return self::SUCCESS;
         }
 
         $this->info('Найдено ' . count($xmlFiles) . " XML файлов в {$folder}");
 
-        // Переносим старые архивы из latest на уровень выше только когда есть новый XML
+        // Existing archives must remain downloadable until the new one is complete.
         $oldArchives = File::glob($latestDir . '/*.tar');
-        foreach ($oldArchives as $oldArchive) {
-            $destination = $folder . '/' . basename($oldArchive);
-            File::move($oldArchive, $destination);
-            $this->line('Перенесен старый архив: ' . basename($oldArchive));
-        }
 
         $tarFileName = $prefix . now('Europe/Moscow')->format('Y-m-d_His') . '.tar';
         $tarPath = $latestDir . '/' . $tarFileName;
+        $tmpTarPath = $latestDir . '/.' . $tarFileName . '.tmp';
+        $tarHandle = null;
+        $expectedEntries = [];
 
-        $tarHandle = fopen($tarPath, 'x+');
-
-        foreach ($xmlFiles as $xmlFile) {
-            $fileName = basename($xmlFile);
-            $fileSize = filesize($xmlFile);
-            $fileContent = file_get_contents($xmlFile);
-
-            $header = $this->createTarHeader($fileName, $fileSize);
-
-            fwrite($tarHandle, $header);
-            fwrite($tarHandle, $fileContent);
-
-            $padding = 512 - ($fileSize % 512);
-            if ($padding < 512) {
-                fwrite($tarHandle, str_repeat("\0", $padding));
+        try {
+            if (File::exists($tmpTarPath)) {
+                File::delete($tmpTarPath);
             }
 
-            $this->line("Добавлен: {$fileName} ({$fileSize} байт)");
+            $tarHandle = fopen($tmpTarPath, 'x+b');
+            if ($tarHandle === false) {
+                throw new \RuntimeException("Не удалось создать временный TAR: {$tmpTarPath}");
+            }
+
+            foreach ($xmlFiles as $xmlFile) {
+                $fileName = basename($xmlFile);
+                $fileSize = filesize($xmlFile);
+                if ($fileSize === false) {
+                    throw new \RuntimeException("Не удалось определить размер XML: {$fileName}");
+                }
+
+                $this->addFileToTar($tarHandle, $xmlFile, $fileName, $fileSize);
+                $expectedEntries[$fileName] = $fileSize;
+                $this->line("Добавлен во временный TAR: {$fileName} ({$fileSize} байт)");
+            }
+
+            $this->writeAll($tarHandle, str_repeat("\0", 1024));
+            if (!fflush($tarHandle)) {
+                throw new \RuntimeException('Не удалось записать TAR на диск.');
+            }
+            fclose($tarHandle);
+            $tarHandle = null;
+
+            $this->assertArchiveIsComplete($tmpTarPath, $expectedEntries);
+
+            if (!File::move($tmpTarPath, $tarPath)) {
+                throw new \RuntimeException("Не удалось опубликовать TAR: {$tarPath}");
+            }
+
+        } catch (\Throwable $e) {
+            if (is_resource($tarHandle)) {
+                fclose($tarHandle);
+            }
+            if (File::exists($tmpTarPath)) {
+                File::delete($tmpTarPath);
+            }
+
+            $this->error('Новый TAR не опубликован; предыдущий архив остаётся доступен: ' . $e->getMessage());
+
+            return self::FAILURE;
         }
 
-        // Конец архива
-        fwrite($tarHandle, str_repeat("\0", 1024));
-        fclose($tarHandle);
+        foreach ($oldArchives as $oldArchive) {
+            if (!File::exists($oldArchive)) {
+                continue;
+            }
 
-        // Удаляем XML файлы
+            $destination = $folder . '/' . basename($oldArchive);
+            if (File::exists($destination)) {
+                $this->warn('Старый архив уже есть в истории, оставлен в latest: ' . basename($oldArchive));
+
+                continue;
+            }
+
+            if (File::move($oldArchive, $destination)) {
+                $this->line('Перенесен старый архив: ' . basename($oldArchive));
+            } else {
+                $this->warn('Не удалось перенести старый архив, он сохранён в latest: ' . basename($oldArchive));
+            }
+        }
+
         foreach ($xmlFiles as $xmlFile) {
-            File::delete($xmlFile);
-            $this->line('Удален: ' . basename($xmlFile));
+            if (File::delete($xmlFile)) {
+                $this->line('Удален: ' . basename($xmlFile));
+            } else {
+                $this->warn('Не удалось удалить XML, он сохранён для следующего запуска: ' . basename($xmlFile));
+            }
         }
 
         $this->info("✓ TAR архив создан: {$tarPath}");
+        $this->info('✓ Новый TAR опубликован после проверки содержимого');
         $this->info('✓ Исходные XML удалены');
         $this->info('✓ Размер архива: ' . filesize($tarPath) . ' байт');
 
-        return 0;
+        return self::SUCCESS;
+    }
+
+    private function addFileToTar($tarHandle, string $sourcePath, string $fileName, int $fileSize): void
+    {
+        $this->writeAll($tarHandle, $this->createTarHeader($fileName, $fileSize));
+
+        $sourceHandle = fopen($sourcePath, 'rb');
+        if ($sourceHandle === false) {
+            throw new \RuntimeException("Не удалось открыть XML: {$fileName}");
+        }
+
+        try {
+            while (!feof($sourceHandle)) {
+                $chunk = fread($sourceHandle, 1024 * 1024);
+                if ($chunk === false) {
+                    throw new \RuntimeException("Не удалось прочитать XML: {$fileName}");
+                }
+                if ($chunk !== '') {
+                    $this->writeAll($tarHandle, $chunk);
+                }
+            }
+        } finally {
+            fclose($sourceHandle);
+        }
+
+        $padding = (512 - ($fileSize % 512)) % 512;
+        if ($padding > 0) {
+            $this->writeAll($tarHandle, str_repeat("\0", $padding));
+        }
+    }
+
+    private function writeAll($handle, string $content): void
+    {
+        $length = strlen($content);
+        $offset = 0;
+
+        while ($offset < $length) {
+            $written = fwrite($handle, substr($content, $offset));
+            if ($written === false || $written === 0) {
+                throw new \RuntimeException('Не удалось записать TAR на диск.');
+            }
+            $offset += $written;
+        }
+    }
+
+    /**
+     * @param array<string, int> $expectedEntries
+     */
+    private function assertArchiveIsComplete(string $tarPath, array $expectedEntries): void
+    {
+        if (!is_file($tarPath) || filesize($tarPath) < 1024) {
+            throw new \RuntimeException('Временный TAR пуст или не создан.');
+        }
+
+        try {
+            $archive = new \PharData($tarPath);
+            if (count($archive) !== count($expectedEntries)) {
+                throw new \RuntimeException('Временный TAR содержит неполный набор XML.');
+            }
+
+            foreach ($expectedEntries as $fileName => $fileSize) {
+                if (!isset($archive[$fileName]) || $archive[$fileName]->getSize() !== $fileSize) {
+                    throw new \RuntimeException("Временный TAR не содержит корректный XML: {$fileName}");
+                }
+            }
+        } catch (\Throwable $e) {
+            if ($e instanceof \RuntimeException) {
+                throw $e;
+            }
+
+            throw new \RuntimeException('Временный TAR не прошёл проверку: ' . $e->getMessage(), previous: $e);
+        }
     }
 
     private function createTarHeader(string $filename, int $size): string
