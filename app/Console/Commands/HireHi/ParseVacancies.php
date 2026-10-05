@@ -6,6 +6,7 @@ use App\Services\YandexFeedXmlFormat;
 use DateTime;
 use Illuminate\Console\Command;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 
 class ParseVacancies extends Command
@@ -13,7 +14,10 @@ class ParseVacancies extends Command
     protected $signature = 'hirehi:parse-vacancies 
                             {--category=development : Категория вакансий}
                             {--search= : Поисковый запрос}
-                            {--max-pages=0 : Максимум страниц (0 - все)}';
+                            {--max-pages=0 : Максимум страниц (0 - все)}
+                            {--request-delay-ms=1500 : Минимальная пауза между запросами к HireHi API, мс}
+                            {--max-retries=5 : Повторов для 429 и временных ошибок API}
+                            {--retry-delay-seconds=60 : Начальная пауза перед повтором, секунд}';
 
     protected $description = 'Парсинг вакансий с hirehi.ru и генерация XML-фида';
 
@@ -44,6 +48,11 @@ class ParseVacancies extends Command
         '(' => '', ')' => '', '[' => '', ']' => '', '{' => '', '}' => '',
     ];
 
+    private int $requestDelayMs = 1500;
+    private int $maxRetries = 5;
+    private int $retryDelaySeconds = 60;
+    private ?float $lastRequestAt = null;
+
     public function handle(YandexFeedXmlFormat $xml)
     {
         $perPage = 100;
@@ -51,6 +60,10 @@ class ParseVacancies extends Command
         $search = $this->option('search');
         $maxPages = (int) $this->option('max-pages');
         $timeout = 60;
+
+        $this->requestDelayMs = max(250, (int) $this->option('request-delay-ms'));
+        $this->maxRetries = max(0, (int) $this->option('max-retries'));
+        $this->retryDelaySeconds = max(5, (int) $this->option('retry-delay-seconds'));
 
         date_default_timezone_set('Europe/Moscow');
         ini_set('memory_limit', '8G');
@@ -79,10 +92,10 @@ class ParseVacancies extends Command
                 $this->info("Поиск: {$search}");
             }
 
-            $response = Http::timeout($timeout)->get($baseUrl, $queryParams);
+            $response = $this->requestHireHi($baseUrl, $queryParams, $timeout);
 
-            if ($response->failed()) {
-                $this->error('Ошибка при получении данных: ' . $response->status());
+            if ($response === null || $response->failed()) {
+                $this->error('Ошибка при получении данных: ' . ($response?->status() ?? 'network error'));
                 return Command::FAILURE;
             }
 
@@ -130,12 +143,10 @@ class ParseVacancies extends Command
                 try {
                     $queryParams['page'] = $i;
                     
-                    $response = Http::timeout($timeout)
-                        ->retry(3, 1000)
-                        ->get($baseUrl, $queryParams);
+                    $response = $this->requestHireHi($baseUrl, $queryParams, $timeout);
 
-                    if ($response->failed()) {
-                        $this->warn("Ошибка при запросе страницы $i");
+                    if ($response === null || $response->failed()) {
+                        $this->warn("Ошибка при запросе страницы $i: " . ($response?->status() ?? 'network error'));
                         $progressBar->advance();
                         continue;
                     }
@@ -171,7 +182,6 @@ class ParseVacancies extends Command
                         } else {
                             $description = $this->getVacancyDescription($vacancyId);
                             $descriptionCache[$cacheKey] = $description;
-                            sleep(1); // Пауза между запросами деталей
                         }
 
                         // Замена NDA на "Анонимный Работодатель"
@@ -220,9 +230,6 @@ class ParseVacancies extends Command
 
                 $progressBar->advance();
 
-                if ($i < $totalPages) {
-                    sleep(1);
-                }
             }
 
             $progressBar->finish();
@@ -263,15 +270,13 @@ class ParseVacancies extends Command
      */
     private function getVacancyDescription($vacancyId): string
     {
-        try {
-            $response = Http::timeout(30)
-                ->get("https://hirehi.ru/api/jobs/{$vacancyId}");
+        $response = $this->requestHireHi("https://hirehi.ru/api/jobs/{$vacancyId}", [], 30);
 
-            if ($response->failed()) {
-                return '';
-            }
+        if ($response === null || $response->failed()) {
+            return '';
+        }
 
-            $data = $response->json();
+        $data = $response->json();
             
             // Собираем описание из детальных полей
             $parts = [];
@@ -294,11 +299,75 @@ class ParseVacancies extends Command
                 $parts[] = '<strong>Обязанности:</strong><br>' . $this->cleanupHtml($data['responsibilities_details']);
             }
 
-            return implode('<br><br>', $parts);
+        return implode('<br><br>', $parts);
+    }
 
-        } catch (\Exception $e) {
-            return '';
+    private function requestHireHi(string $url, array $query = [], int $timeout = 60): ?Response
+    {
+        $lastResponse = null;
+
+        for ($attempt = 0; $attempt <= $this->maxRetries; $attempt++) {
+            $this->waitForRequestSlot();
+
+            try {
+                $response = Http::timeout($timeout)
+                    ->acceptJson()
+                    ->withHeaders([
+                        'User-Agent' => 'Mozilla/5.0 (compatible; vacancy-feed/1.0)',
+                        'Referer' => 'https://hirehi.ru/',
+                        'X-Requested-With' => 'XMLHttpRequest',
+                    ])
+                    ->get($url, $query);
+            } catch (ConnectionException $exception) {
+                if ($attempt === $this->maxRetries) {
+                    $this->warn('HireHi network error: ' . $exception->getMessage());
+
+                    return null;
+                }
+
+                $this->waitBeforeRetry(null, $attempt + 1, 'network error');
+                continue;
+            }
+
+            $lastResponse = $response;
+
+            if ($response->successful() || !in_array($response->status(), [429, 500, 502, 503, 504], true)) {
+                return $response;
+            }
+
+            if ($attempt === $this->maxRetries) {
+                return $response;
+            }
+
+            $this->waitBeforeRetry($response, $attempt + 1, 'HTTP ' . $response->status());
         }
+
+        return $lastResponse;
+    }
+
+    private function waitForRequestSlot(): void
+    {
+        if ($this->lastRequestAt !== null) {
+            $waitMicroseconds = (int) (($this->requestDelayMs / 1000 - (microtime(true) - $this->lastRequestAt)) * 1_000_000);
+
+            if ($waitMicroseconds > 0) {
+                usleep($waitMicroseconds);
+            }
+        }
+
+        $this->lastRequestAt = microtime(true);
+    }
+
+    private function waitBeforeRetry(?Response $response, int $attempt, string $reason): void
+    {
+        $retryAfter = $response?->header('Retry-After');
+        $seconds = is_numeric($retryAfter)
+            ? (int) $retryAfter
+            : min($this->retryDelaySeconds * (2 ** ($attempt - 1)), 600);
+        $seconds = max(5, min($seconds, 900));
+
+        $this->warn("HireHi {$reason}; retry {$attempt}/{$this->maxRetries} in {$seconds}s.");
+        sleep($seconds);
     }
 
     /**
