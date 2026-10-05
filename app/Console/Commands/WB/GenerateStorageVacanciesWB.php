@@ -3,9 +3,9 @@
 namespace App\Console\Commands\WB;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Services\WbJobCities;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Http;
 
 class GenerateStorageVacanciesWB extends Command
 {
@@ -48,11 +48,13 @@ TXT;
     private const XML_HOST = 'career.wb.ru';
 
     private YandexFeedXmlFormat $xmlFormatter;
+    private WbJobCities $cities;
 
-    public function __construct(YandexFeedXmlFormat $xmlFormatter)
+    public function __construct(YandexFeedXmlFormat $xmlFormatter, WbJobCities $cities)
     {
         parent::__construct();
         $this->xmlFormatter = $xmlFormatter;
+        $this->cities = $cities;
     }
 
     public function handle(): int
@@ -61,29 +63,9 @@ TXT;
         $xmlPath    = storage_path('app/public/wb/' . $xmlOutFile . today()->toDateString() . '.xml');
 
         try {
-            $this->info('Шаг 1: Ищем актуальный JS-файл...');
-            $jsUrl = $this->discoverJavascriptUrl();
-            $this->info("Найден актуальный скрипт: {$jsUrl}");
-
-            $this->info('Шаг 2: Парсим список городов из JS...');
-            $jsContent = $this->fetchJsContent($jsUrl);
-
-            $pattern = '/\{label:"([^"]+)",value:(\d+)\}/u';
-            if (!preg_match_all($pattern, $jsContent, $citiesMatches, PREG_SET_ORDER)) {
-                $this->error('Список городов не найден в файле. Возможно, изменился формат данных.');
-                return self::FAILURE;
-            }
-
-            $cities = [];
-            $count = 0;
-            foreach ($citiesMatches as $match) {
-                $cityName = $match[1];
-                $cityId = (int) $match[2];
-                $cities[] = ['label' => $cityName, 'value' => $cityId];
-                $this->line("Найдено: {$cityName} (ID: {$cityId})");
-                $count++;
-            }
-            $this->info("Всего обновлено городов: {$count}");
+            $this->info('Запрашиваю актуальный список городов WB...');
+            $cities = $this->cities->all();
+            $this->info('Всего обновлено городов: ' . count($cities));
 
             if (empty($cities)) {
                 $this->warn('Города не найдены — файл не создан.');
@@ -94,8 +76,8 @@ TXT;
             $rows = [];
             foreach ($cities as $cityData) {
                 $rows[] = $this->makeVacancyRow(
-                    (int)($cityData['value'] ?? null),
-                    (string)($cityData['label'] ?? '')
+                    (int)($cityData['id'] ?? null),
+                    (string)($cityData['name'] ?? '')
                 );
             }
 

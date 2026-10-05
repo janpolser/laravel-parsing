@@ -3,9 +3,9 @@
 namespace App\Console\Commands\WB;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Services\WbJobCities;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Http;
 
 class GenerateDriverCEVacanciesWB extends Command
 {
@@ -20,37 +20,32 @@ class GenerateDriverCEVacanciesWB extends Command
     private const XML_HOST      = 'job.wb.ru';
 
     private const DESCRIPTION = <<<TXT
-            Приглашаем к сотрудничеству водителей категории «B» со стажем работы от 1 го года на автомобилях "Газель" и "Sollers Atlant".
-            Мы предлагаем работу, на новых автомобилях компании марки Газель и Sollers Atlant, для осуществления доставки заказов из сортировочных центров (СЦ) до Пунктов Выдачи Заказов (ПВЗ).
-            Совокупный доход в месяц от 105 000 до 200 000 руб.
-            Работа сдельная с оплатой в конце смены.
-            Компания предоставляет корпоративный транспорт до СЦ.
-            Что нужно делать:
-            Доставлять заказы с СЦ до ПВЗ (фиксированный район маршрута)
-            Осуществлять возврат невостребованных заказов на СЦ
-            Осуществлять прием и сдачу ТС в начале и конце смены
-            Бережная эксплуатация ТС
-            Использование специального мобильного приложения компании.
-            Для сотрудничества с Wildberries Вам нужно иметь:
-            Статус самозанятого  если не хотите в штат
-            Наличие прав категории «B»
-            Телефон на операционной системе Android
-            Грамотная речь
-            Стрессоустойчивость
-            Знание устройства автомобиля
-            Мы бы хотели, чтобы у Вас было:
-            Образование средне-профессиональное и выше
-            Опыт работы водителем категории B (типа Газель) – от 1 года
-            Наличие профильного образования в автомобильной области приветствуется
-            Опыт сотрудничества в сфере доставки интернет-заказов будет преимуществом
+            Вам предстоит
+
+                доставлять грузы между складами и сортировочными центрами разных городов.
+
+            Почему стоит выбрать именно Wildberries
+
+                Официальное трудоустройство с первого дня Выплачиваем «белую» зарплату, оплачиваем отпуска и больничные.
+                Стабильный доход и прозрачная система выплат до 250 000 ₽ в месяц, доход зависит от протяжённости маршрута. Выплаты 2 раза в неделю — в понедельник и в четверг. Возможны подработки на коротких маршрутах.
+                Новый и чистый автопарк Выдаём ключи от DongFeng, FAW, SITRAK, FOTON, JAC для комфортной работы. Все автомобили проходят ТО и оборудованы датчиками уровня топлива.
+                Забота о сотрудниках Предоставляем дополнительные скидки на товары и услуги партнёров.
+                Развитая корпоративная система поддержки Оплачиваем топливную карту, мойку и ТО.
+
+            Что мы ждём от вас:
+
+                открытую категорию СE;
+                стаж вождения на полуприцепах от 2 лет.
         TXT;
 
     private YandexFeedXmlFormat $xmlFormatter;
+    private WbJobCities $cities;
 
-    public function __construct(YandexFeedXmlFormat $xmlFormatter)
+    public function __construct(YandexFeedXmlFormat $xmlFormatter, WbJobCities $cities)
     {
         parent::__construct();
         $this->xmlFormatter = $xmlFormatter;
+        $this->cities = $cities;
     }
 
     public function handle(): int
@@ -59,11 +54,8 @@ class GenerateDriverCEVacanciesWB extends Command
         $xmlPath    = storage_path('app/public/wb/' . $xmlOutFile . today()->toDateString() . '.xml');
 
         try {
-            $this->info('Ищу JS-ассет со списком городов...');
-            [$chunkUrl, $arrayJson] = $this->locateChunkWithCityArray();
-
-            $this->info("Обрабатываю ассет: {$chunkUrl}");
-            $cities = $this->parseCityArray($arrayJson);
+            $this->info('Запрашиваю актуальный список городов WB...');
+            $cities = $this->cities->all();
 
             if (empty($cities)) {
                 $this->warn('Список городов пуст — файл не создан.');

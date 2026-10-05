@@ -3,9 +3,9 @@
 namespace App\Console\Commands\WB;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Services\WbJobCities;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Http;
 
 class GenerateDriverVacanciesWB extends Command
 {
@@ -14,36 +14,37 @@ class GenerateDriverVacanciesWB extends Command
 
     protected $description = 'Извлекает города из JS-ассета driver-b и формирует XML-фид вакансий водителей Wildberries.';
 
-    private const VACANCY_TITLE = 'Водитель категории CE (доставка между складами)';
+    private const VACANCY_TITLE = 'Водитель категории B (доставка со склада до ПВЗ)';
     private const SALARY_FROM   = null;
     private const SALARY_TO     = 250000;
     private const XML_HOST      = 'job.wb.ru';
 
     private const DESCRIPTION = <<<TXT
-            Вам предстоит
-
-                доставлять грузы между складами и сортировочными центрами разных городов.
-
-            Почему стоит выбрать именно Wildberries
-
-                Официальное трудоустройство с первого дня Выплачиваем «белую» зарплату, оплачиваем отпуска и больничные.
-                Стабильный доход и прозрачная система выплат до 250 000 ₽ в месяц, доход зависит от протяжённости маршрута. Выплаты 2 раза в неделю — в понедельник и в четверг. Возможны подработки на коротких маршрутах.
-                Новый и чистый автопарк Выдаём ключи от DongFeng, FAW, SITRAK, FOTON, JAC для комфортной работы. Все автомобили проходят ТО и оборудованы датчиками уровня топлива.
-                Забота о сотрудниках Предоставляем дополнительные скидки на товары и услуги партнёров.
-                Развитая корпоративная система поддержки Оплачиваем топливную карту, мойку и ТО.
-
-            Что мы ждём от вас:
-
-                открытую категорию СE;
-                стаж вождения на полуприцепах от 2 лет.
+            Приглашаем к сотрудничеству водителей категории «B» со стажем работы от 1 года на автомобилях «Газель» и Sollers Atlant.
+            Мы предлагаем работу на новых автомобилях компании для доставки заказов из сортировочных центров до пунктов выдачи заказов.
+            Совокупный доход в месяц от 105 000 до 200 000 руб.
+            Работа сдельная с оплатой в конце смены.
+            Компания предоставляет корпоративный транспорт до сортировочного центра.
+            Что нужно делать:
+            Доставлять заказы с сортировочного центра до пунктов выдачи заказов в закреплённом районе.
+            Осуществлять возврат невостребованных заказов на сортировочный центр.
+            Осуществлять приём и сдачу транспортного средства в начале и конце смены.
+            Бережно эксплуатировать транспорт и использовать специальное мобильное приложение компании.
+            Для сотрудничества с Wildberries нужны:
+            Статус самозанятого или готовность к оформлению в штат.
+            Права категории «B» и телефон на Android.
+            Грамотная речь, стрессоустойчивость и знание устройства автомобиля.
+            Преимуществом будут среднее профессиональное образование и опыт работы водителем категории B от одного года.
         TXT;
 
     private YandexFeedXmlFormat $xmlFormatter;
+    private WbJobCities $cities;
 
-    public function __construct(YandexFeedXmlFormat $xmlFormatter)
+    public function __construct(YandexFeedXmlFormat $xmlFormatter, WbJobCities $cities)
     {
         parent::__construct();
         $this->xmlFormatter = $xmlFormatter;
+        $this->cities = $cities;
     }
 
     public function handle(): int
@@ -52,11 +53,8 @@ class GenerateDriverVacanciesWB extends Command
         $xmlPath    = storage_path('app/public/wb/' . $xmlOutFile . today()->toDateString() . '.xml');
 
         try {
-            $this->info('Ищу JS-ассет со списком городов...');
-            [$chunkUrl, $arrayJson] = $this->locateChunkWithCityArray();
-
-            $this->info("Обрабатываю ассет: {$chunkUrl}");
-            $cities = $this->parseCityArray($arrayJson);
+            $this->info('Запрашиваю актуальный список городов WB...');
+            $cities = $this->cities->all();
 
             if (empty($cities)) {
                 $this->warn('Список городов пуст — файл не создан.');
