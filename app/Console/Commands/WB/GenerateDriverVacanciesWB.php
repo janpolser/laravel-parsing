@@ -12,7 +12,7 @@ class GenerateDriverVacanciesWB extends Command
     protected $signature = 'wb:generate-driver-b-vacancies
         {--xml-outfile=wb_driver_b_vacancies : Имя XML-файла в storage/app (без .xml)}';
 
-    protected $description = 'Извлекает города из JS-ассета driver-b и формирует XML-фид вакансий водителей Wildberries.';
+    protected $description = 'Использует список городов WB Job и формирует XML-фид вакансий водителей Wildberries.';
 
     private const VACANCY_TITLE = 'Водитель категории B (доставка со склада до ПВЗ)';
     private const SALARY_FROM   = null;

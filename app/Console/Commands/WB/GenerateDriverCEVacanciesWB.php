@@ -12,7 +12,7 @@ class GenerateDriverCEVacanciesWB extends Command
     protected $signature = 'wb:generate-driver-ce-vacancies
         {--xml-outfile=wb_driver_ce_vacancies : Имя XML-файла в storage/app (без .xml)}';
 
-    protected $description = 'Извлекает города из JS-ассета driver-ce и формирует XML-фид вакансий водителей Wildberries.';
+    protected $description = 'Использует список городов WB Job и формирует XML-фид вакансий водителей Wildberries.';
 
     private const VACANCY_TITLE = 'Водитель категории CE (доставка между складами)';
     private const SALARY_FROM   = null;

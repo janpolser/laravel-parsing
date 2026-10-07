@@ -12,7 +12,7 @@ class GenerateStorageVacanciesWB extends Command
     protected $signature = 'wb:generate-storage-vacancies
         {--xml-outfile=wb_storage_vacancies : Имя XML-файла в storage/app (без .xml)}';
 
-    protected $description = 'Извлекает список городов из JS и формирует XML-фид вакансий Wildberries.';
+    protected $description = 'Использует список городов WB Job и формирует XML-фид вакансий Wildberries.';
 
     // Фиксированные поля вакансии по ТЗ
     private const VACANCY_TITLE = 'Исполнитель услуг склада (упаковка/сортировка/разгрузка)';

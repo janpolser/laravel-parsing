@@ -6,8 +6,7 @@ use Illuminate\Support\Facades\Http;
 
 final class WbJobCities
 {
-    private const URL = 'https://wbk.wb.ru/community-utils/api/feedback/city';
-    private const PAGE_SIZE = 500;
+    private const URL = 'https://job.wb.ru/assets/data/areas.json';
 
     /**
      * @return list<array{id: int, name: string}>
@@ -15,43 +14,37 @@ final class WbJobCities
     public function all(): array
     {
         $cities = [];
-        $offset = 0;
 
-        do {
-            $response = Http::timeout(25)
-                ->acceptJson()
-                ->asJson()
-                ->post(self::URL, [
-                    'search' => '',
-                    'limit' => self::PAGE_SIZE,
-                    'offset' => $offset,
-                ]);
+        $response = Http::timeout(30)
+            ->acceptJson()
+            ->get(self::URL);
 
-            if (! $response->ok()) {
-                throw new \RuntimeException('Не удалось получить список городов WB: HTTP ' . $response->status());
+        if (! $response->ok()) {
+            throw new \RuntimeException('Не удалось получить список городов WB Job: HTTP ' . $response->status());
+        }
+
+        $areas = $response->json();
+        if (! is_array($areas)) {
+            throw new \RuntimeException('WB Job вернул некорректный список городов.');
+        }
+
+        foreach ($areas as $area) {
+            if (! is_array($area)) {
+                continue;
             }
 
-            $batch = $response->json('cities', []);
-            if (! is_array($batch)) {
-                throw new \RuntimeException('WB вернул некорректный список городов.');
+            $id = filter_var($area['id'] ?? null, FILTER_VALIDATE_INT);
+            $name = trim((string) ($area['name'] ?? ''));
+
+            if ($id === false || $id < 1 || $name === '') {
+                continue;
             }
 
-            foreach ($batch as $city) {
-                $id = filter_var($city['id'] ?? null, FILTER_VALIDATE_INT);
-                $name = trim((string) ($city['city'] ?? ''));
-
-                if ($id === false || $id < 1 || $name === '') {
-                    continue;
-                }
-
-                $cities[$id] = ['id' => $id, 'name' => $name];
-            }
-
-            $offset += count($batch);
-        } while (count($batch) === self::PAGE_SIZE);
+            $cities[$id] = ['id' => $id, 'name' => $name];
+        }
 
         if ($cities === []) {
-            throw new \RuntimeException('WB не вернул ни одного города.');
+            throw new \RuntimeException('WB Job не вернул ни одного города.');
         }
 
         return array_values($cities);

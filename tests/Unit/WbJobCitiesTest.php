@@ -5,22 +5,22 @@ use Illuminate\Support\Facades\Http;
 
 uses(Tests\TestCase::class);
 
-test('wb job city provider paginates and normalizes cities', function () {
+test('wb job city provider normalizes areas json', function () {
     Http::fake([
-        'https://wbk.wb.ru/community-utils/api/feedback/city' => Http::sequence()
-            ->push(['cities' => [
-                ['id' => 1, 'city' => 'Москва'],
-                ['id' => 'invalid', 'city' => 'Пропустить'],
-            ]])
+        'https://job.wb.ru/assets/data/areas.json' => Http::response([
+            ['id' => '1', 'name' => 'Москва'],
+            ['id' => 'invalid', 'name' => 'Пропустить'],
+            ['id' => '2', 'name' => ''],
+            ['id' => '1', 'name' => 'Москва'],
+        ]),
     ]);
 
-    $cities = (new WbJobCities())->all();
+    $cities = (new WbJobCities)->all();
 
     expect($cities)->toBe([['id' => 1, 'name' => 'Москва']]);
 
     Http::assertSent(function ($request) {
-        return $request->url() === 'https://wbk.wb.ru/community-utils/api/feedback/city'
-            && $request['limit'] === 500
-            && $request['offset'] === 0;
+        return $request->url() === 'https://job.wb.ru/assets/data/areas.json'
+            && $request->method() === 'GET';
     });
 });
