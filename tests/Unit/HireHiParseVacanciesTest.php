@@ -81,6 +81,33 @@ test('hirehi preserves pagination and the requested page limit with incomplete c
     'one page limit' => [1, 1],
 ]);
 
+test('hirehi can fetch only a bounded page range for feed reconciliation', function () {
+    Http::fake([
+        'https://hirehi.ru/api/search/jobs*' => Http::sequence()
+            ->push(['filter_counts' => ['format' => ['офис' => 14687]]])
+            ->push(['jobs' => [['id' => 145, 'title' => 'Developer 145', 'company' => 'Test Company']]])
+            ->push(['jobs' => [['id' => 146, 'title' => 'Developer 146', 'company' => 'Test Company']]]),
+        'https://hirehi.ru/api/jobs/*' => Http::response(['description' => 'Build applications']),
+    ]);
+
+    $this->mock(YandexFeedXmlFormat::class, function ($mock) {
+        $mock->shouldReceive('createXmlFeed')->once()
+            ->withArgs(fn (array $vacancies, string $host, string $path) => count($vacancies) === 2);
+    });
+
+    $this->artisan('hirehi:parse-vacancies', [
+        '--start-page' => 145,
+        '--end-page' => 146,
+        '--request-delay-ms' => 250,
+        '--max-retries' => 0,
+    ])->assertSuccessful();
+
+    $requestedPages = Http::recorded(fn ($request) => str_starts_with($request->url(), 'https://hirehi.ru/api/search/jobs'))
+        ->map(fn ($pair) => (int) $pair[0]['page'])->values()->all();
+    expect($requestedPages)->toBe([1, 145, 146]);
+    Http::assertSentCount(5);
+});
+
 test('hirehi does not generate a feed when filtered counters are empty', function (array $formatCounts) {
     Http::fake([
         'https://hirehi.ru/api/search/jobs*' => Http::response([

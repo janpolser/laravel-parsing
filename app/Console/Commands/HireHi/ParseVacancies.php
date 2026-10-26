@@ -15,6 +15,8 @@ class ParseVacancies extends Command
                             {--category=development : Категория вакансий}
                             {--search= : Поисковый запрос}
                             {--max-pages=0 : Максимум страниц (0 - все)}
+                            {--start-page=1 : Первая страница для выборочного обновления}
+                            {--end-page=0 : Последняя страница для выборочного обновления (0 - до конца)}
                             {--request-delay-ms=1500 : Минимальная пауза между запросами к HireHi API, мс}
                             {--max-retries=5 : Повторов для 429 и временных ошибок API}
                             {--retry-delay-seconds=60 : Начальная пауза перед повтором, секунд}';
@@ -59,6 +61,8 @@ class ParseVacancies extends Command
         $category = $this->option('category');
         $search = $this->option('search');
         $maxPages = (int) $this->option('max-pages');
+        $startPage = max(1, (int) $this->option('start-page'));
+        $endPage = (int) $this->option('end-page');
         $timeout = 60;
 
         $this->requestDelayMs = max(250, (int) $this->option('request-delay-ms'));
@@ -130,17 +134,25 @@ class ParseVacancies extends Command
                 $this->info("Всего страниц для обработки: {$totalPages}");
             }
 
+            if ($endPage > 0) {
+                $totalPages = min($totalPages, $endPage);
+            }
+            if ($startPage > $totalPages) {
+                $this->error('Первая страница выходит за пределы доступного диапазона');
+                return Command::FAILURE;
+            }
+
             $editedVacancies = [];
             $processedCount = 0;
             $descriptionCache = [];
 
-            $progressBar = $this->output->createProgressBar($totalPages);
+            $progressBar = $this->output->createProgressBar($totalPages - $startPage + 1);
             $progressBar->start();
 
             // Для последующих запросов отключаем include_counts
             $queryParams['include_counts'] = 'false';
 
-            for ($i = 1; $i <= $totalPages; $i++) {
+            for ($i = $startPage; $i <= $totalPages; $i++) {
                 try {
                     $queryParams['page'] = $i;
                     
