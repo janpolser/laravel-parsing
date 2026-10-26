@@ -37,6 +37,7 @@ class MergeHireHiXmlTest(unittest.TestCase):
             self.assertEqual(result['records'], 2)
             self.assertEqual(sorted(path.name for path in feed.glob('*.xml')), ['reconciled.xml'])
             self.assertEqual(sorted(path.name for path in backup.glob('*.xml')), ['new.xml', 'old.xml'])
+            self.assertEqual((feed / 'reconciled.xml').stat().st_mode & 0o777, 0o644)
             merged = ET.parse(feed / 'reconciled.xml').getroot()
             vacancies = merged.findall('./vacancies/vacancy')
             self.assertEqual(len(vacancies), 2)

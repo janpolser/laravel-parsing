@@ -64,6 +64,7 @@ def merge(source_dir: Path, output_name: str, backup_dir: Path) -> dict:
         verified_root = ET.parse(temp_path).getroot()
         if len(verified_root.findall('./vacancies/vacancy')) != len(vacancies):
             raise ValueError('Merged XML verification failed')
+        temp_path.chmod(0o644)
 
         backup_dir.mkdir(parents=True)
         for path in sources:
