@@ -1,11 +1,19 @@
 <?php
 
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schedule;
 
 // Магнит
 Schedule::command('magnit:collect-vacancy-magnit')
     ->dailyAt('07:00')
     ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'magnit']);
+        if ($exitCode !== 0) {
+            Log::error('Magnit feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
     ->withoutOverlapping();
 
 // Яндекс
