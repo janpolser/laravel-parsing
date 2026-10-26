@@ -106,12 +106,13 @@ class ParseVacancies extends Command
             $totalCount = 0;
             
             if (!empty($formatCounts)) {
-                $totalCount = ($formatCounts['гибрид'] ?? 0) 
-                            + ($formatCounts['офис'] ?? 0) 
-                            + ($formatCounts['удалённо'] ?? 0) 
-                            + ($formatCounts['удалённо по РФ'] ?? 0);
-                
-                $this->info("Каунты: гибрид({$formatCounts['гибрид']}) + офис({$formatCounts['офис']}) + удалённо({$formatCounts['удалённо']}) + удалённо_по_рф({$formatCounts['удалённо по РФ']}) = {$totalCount}");
+                $hybridCount = (int) ($formatCounts['гибрид'] ?? 0);
+                $officeCount = (int) ($formatCounts['офис'] ?? 0);
+                $remoteCount = (int) ($formatCounts['удалённо'] ?? 0);
+                $remoteRussiaCount = (int) ($formatCounts['удалённо по РФ'] ?? 0);
+                $totalCount = $hybridCount + $officeCount + $remoteCount + $remoteRussiaCount;
+
+                $this->info("Каунты: гибрид({$hybridCount}) + офис({$officeCount}) + удалённо({$remoteCount}) + удалённо_по_рф({$remoteRussiaCount}) = {$totalCount}");
             }
 
             if ($totalCount === 0) {
