@@ -15,6 +15,7 @@ class CollectVacancy extends Command
     protected $description = 'Парсинг вакансий Магнит с устойчивостью и потоковой записью';
 
     private const DETAIL_URL = 'https://rabota.magnit.ru/api/v1/vacancy/';
+
     private const DETAIL_CACHE_LIMIT = 200;
 
     private const PROPERTY_VALUE_NAMES = [
@@ -47,12 +48,17 @@ class CollectVacancy extends Command
         // Запрос локаций
         $this->info('Получение списка локаций...');
         $locationResponse = $this->safeRequest('https://rabota.magnit.ru/api/v1/locality?page=1&per_page=20000');
-        $locations = array_map(fn($i) => ['id' => $i['id'], 'name' => $i['name'], 'slug' => $i['slug']], $locationResponse['results'] ?? []);
+        $locationRows = $locationResponse['results'] ?? null;
+        $locationMeta = $locationResponse['meta'] ?? null;
+        if (($locationResponse['success'] ?? false) !== true || !is_array($locationRows) || $locationRows === []
+            || !is_array($locationMeta) || ($locationMeta['has_more_pages'] ?? null) !== false
+            || !isset($locationMeta['total']) || (int) $locationMeta['total'] !== count($locationRows)) {
+            $this->error('Не удалось получить полный список локаций');
 
-        if (empty($locations)) {
-            $this->error('Не удалось получить список локаций');
             return 1;
         }
+
+        $locations = array_map(fn($i) => ['id' => $i['id'], 'name' => $i['name'], 'slug' => $i['slug']], $locationRows);
 
         $this->info('Найдено локаций: ' . count($locations));
 
@@ -93,13 +99,22 @@ class CollectVacancy extends Command
 
                     $vacancyResponse = $this->safeRequest($url);
 
-                    if (!$vacancyResponse || !isset($vacancyResponse['results']) || !is_array($vacancyResponse['results'])) {
-                        break;
+                    $vacancyMeta = $vacancyResponse['meta'] ?? null;
+                    if (($vacancyResponse['success'] ?? false) !== true
+                        || !isset($vacancyResponse['results']) || !is_array($vacancyResponse['results'])
+                        || !is_array($vacancyMeta) || !is_bool($vacancyMeta['has_more_pages'] ?? null)
+                        || (int) ($vacancyMeta['current_page'] ?? 0) !== $page) {
+                        throw new \RuntimeException("Неполная страница вакансий: локация {$item['id']}, страница {$page}");
+                    }
+
+                    $hasNextPage = $vacancyMeta['has_more_pages'];
+                    if ($hasNextPage && $vacancyResponse['results'] === []) {
+                        throw new \RuntimeException("Пустая промежуточная страница вакансий: локация {$item['id']}, страница {$page}");
                     }
 
                     // Создаем прогресс-бар для страниц при первой итерации
                     if ($page === 1) {
-                        $totalPages = $vacancyResponse['pagination']['total_pages'] ?? 1;
+                        $totalPages = max(1, (int) ceil(($vacancyMeta['total'] ?? count($vacancyResponse['results'])) / 500));
                         $pagesProgressBar = $this->output->createProgressBar($totalPages);
                         $pagesProgressBar->setFormat('  Страница %current%/%max% [%bar%] %percent:3s%%');
                         $pagesProgressBar->start();
@@ -107,9 +122,10 @@ class CollectVacancy extends Command
 
                     foreach ($vacancyResponse['results'] as $vacancy) {
                         if (!empty($vacancy['active'])) {
-                            $vacancyId = (string)($vacancy['id'] ?? '');
+                            $vacancyId = (string) ($vacancy['id'] ?? '');
                             if ($vacancyId !== '' && isset($seenVacancyIds[$vacancyId])) {
                                 $skippedDuplicateVacancies++;
+
                                 continue;
                             }
 
@@ -125,6 +141,7 @@ class CollectVacancy extends Command
                             $feedVacancy = $this->mapVacancyToFeed($vacancy, $item, $date, $locationsById);
                             if ($feedVacancy === null) {
                                 $skippedWithoutLocation++;
+
                                 continue;
                             }
 
@@ -137,16 +154,6 @@ class CollectVacancy extends Command
                     // Обновляем прогресс-бар страниц
                     if ($pagesProgressBar) {
                         $pagesProgressBar->advance();
-                    }
-
-                    $hasNextPage = false;
-                    if (isset($vacancyResponse['next']) && !empty($vacancyResponse['next'])) {
-                        $hasNextPage = true;
-                    } elseif (isset($vacancyResponse['pagination']) &&
-                        $page < $vacancyResponse['pagination']['total_pages']) {
-                        $hasNextPage = true;
-                    } elseif (count($vacancyResponse['results']) == 500) {
-                        $hasNextPage = true;
                     }
 
                     unset($vacancyResponse);
@@ -165,7 +172,7 @@ class CollectVacancy extends Command
 
                 // Обновляем основной прогресс-бар
                 $processedLocations++;
-                $locationsProgressBar->setMessage("Обработано вакансий: " . $totalVacancies);
+                $locationsProgressBar->setMessage('Обработано вакансий: ' . $totalVacancies);
                 $locationsProgressBar->advance();
             }
 
@@ -176,6 +183,10 @@ class CollectVacancy extends Command
             $this->info('Всего собрано вакансий: ' . $totalVacancies);
             $this->info('Пропущено дублей вакансий: ' . $skippedDuplicateVacancies);
             $this->info('Пропущено вакансий без адреса/локации: ' . $skippedWithoutLocation);
+
+            if ($totalVacancies === 0) {
+                throw new \RuntimeException('Магнит вернул ноль вакансий; прежний фид сохранён');
+            }
 
             $this->finishXmlWriter($writer);
             $this->publishTmpFile($tmpPath, $filePath);
@@ -194,7 +205,7 @@ class CollectVacancy extends Command
 
     private function initXmlWriter(string $filePath, string $hostName): \XMLWriter
     {
-        $writer = new \XMLWriter();
+        $writer = new \XMLWriter;
         $writer->openURI($filePath);
         $writer->startDocument('1.0', 'utf-8');
         $writer->startElement('source');
@@ -530,15 +541,15 @@ class CollectVacancy extends Command
         $to = $vacancy['salary_to'] ?? null;
 
         if ($from && $to) {
-            return 'от ' . number_format((float)$from, 0, '', ' ') . ' до ' . number_format((float)$to, 0, '', ' ') . ' руб';
+            return 'от ' . number_format((float) $from, 0, '', ' ') . ' до ' . number_format((float) $to, 0, '', ' ') . ' руб';
         }
 
         if ($from) {
-            return 'от ' . number_format((float)$from, 0, '', ' ') . ' руб';
+            return 'от ' . number_format((float) $from, 0, '', ' ') . ' руб';
         }
 
         if ($to) {
-            return 'до ' . number_format((float)$to, 0, '', ' ') . ' руб';
+            return 'до ' . number_format((float) $to, 0, '', ' ') . ' руб';
         }
 
         return null;
@@ -558,7 +569,8 @@ class CollectVacancy extends Command
         }
 
         if (is_scalar($value)) {
-            $text = $this->normalizeText((string)$value);
+            $text = $this->normalizeText((string) $value);
+
             return $text === null || $text === '' ? [] : [$text];
         }
 
@@ -568,7 +580,8 @@ class CollectVacancy extends Command
 
         foreach (['name', 'title', 'text', 'value'] as $key) {
             if (isset($value[$key]) && is_scalar($value[$key])) {
-                $text = $this->normalizeText((string)$value[$key]);
+                $text = $this->normalizeText((string) $value[$key]);
+
                 return $text === null || $text === '' ? [] : [$text];
             }
         }
@@ -576,10 +589,11 @@ class CollectVacancy extends Command
         $items = [];
         foreach ($value as $entry) {
             if (is_scalar($entry)) {
-                $text = $this->normalizeText((string)$entry);
+                $text = $this->normalizeText((string) $entry);
                 if ($text !== null && $text !== '') {
                     $items[] = $text;
                 }
+
                 continue;
             }
 
@@ -590,7 +604,7 @@ class CollectVacancy extends Command
             $text = null;
             foreach (['name', 'title', 'text', 'value'] as $key) {
                 if (isset($entry[$key]) && is_scalar($entry[$key])) {
-                    $text = $this->normalizeText((string)$entry[$key]);
+                    $text = $this->normalizeText((string) $entry[$key]);
                     break;
                 }
             }
@@ -607,7 +621,7 @@ class CollectVacancy extends Command
     {
         $clean = [];
         foreach ($this->uniqueTextItems($items) as $item) {
-            $text = rtrim($this->normalizeText((string)$item) ?? '', " \t\n\r\0\x0B;,");
+            $text = rtrim($this->normalizeText((string) $item) ?? '', " \t\n\r\0\x0B;,");
             if ($text !== '') {
                 $clean[] = $text;
             }
@@ -620,7 +634,7 @@ class CollectVacancy extends Command
     {
         $clean = [];
         foreach ($this->uniqueTextItems($items) as $item) {
-            $text = $this->normalizeText((string)$item);
+            $text = $this->normalizeText((string) $item);
             if ($text !== null && $text !== '') {
                 $clean[] = $text;
             }
@@ -640,7 +654,7 @@ class CollectVacancy extends Command
     {
         $unique = [];
         foreach ($items as $item) {
-            $text = $this->normalizeText((string)$item);
+            $text = $this->normalizeText((string) $item);
             if ($text === null || $text === '' || isset($unique[$text])) {
                 continue;
             }
@@ -673,7 +687,7 @@ class CollectVacancy extends Command
     {
         for ($i = 1; $i <= $attempts; $i++) {
             try {
-                $response = Http::timeout(30)->get($url);
+                $response = Http::timeout(30)->withHeaders(['Accept-Encoding' => 'gzip'])->get($url);
 
                 if ($response->successful()) {
                     $json = $response->json();
