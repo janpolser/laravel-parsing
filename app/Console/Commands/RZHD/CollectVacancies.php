@@ -10,17 +10,24 @@ use Illuminate\Support\Facades\Http;
 class CollectVacancies extends Command
 {
     protected $signature = 'rzhd:collect-vacancies {--outfile=rzhd_vacancies : Базовое имя xml-файла в storage/app}';
+
     protected $description = 'Собирает вакансии с team.rzd.ru и генерирует YVL-совместимый XML через сервис';
 
     private const BASE_URL = 'https://team.rzd.ru/api/v1/career/vacancies';
+
+    private const LIST_PAGE_SIZE = 500;
+
     private const HOST = 'team.rzd.ru';
+
     private const TIMEZONE = 'Europe/Moscow';
+
     private const EMPLOYMENT_LABELS = [
         'full' => 'полная',
         'part' => 'частичная',
         'temporary' => 'временная',
         'internship' => 'стажировка',
     ];
+
     private const SCHEDULE_LABELS = [
         'shift' => 'сменный',
         'flexible' => 'гибкий',
@@ -30,7 +37,9 @@ class CollectVacancies extends Command
     ];
 
     private array $detailCache = [];
+
     private array $detailByTitle = [];
+
     private YandexFeedXmlFormat $xmlFormatter;
 
     public function __construct(YandexFeedXmlFormat $xmlFormatter)
@@ -42,34 +51,10 @@ class CollectVacancies extends Command
 
     public function handle(): int
     {
-        $outFileName = (string)$this->option('outfile') . today()->toDateString() . '.xml';
+        $outFileName = (string) $this->option('outfile') . today()->toDateString() . '.xml';
 
-        $this->info('Запрос для получения общего количества вакансий...');
-        $countResponse = $this->sendVacancyRequest(1, 1);
-        if (!$countResponse->ok()) {
-            $this->error('Ошибка первичного запроса: HTTP ' . $countResponse->status());
-            return self::FAILURE;
-        }
-
-        $meta = $countResponse->json()['meta'] ?? null;
-        $count = $meta['count'] ?? null;
-        if (!$count || !is_numeric($count)) {
-            $this->error('Не удалось получить meta.count');
-            return self::FAILURE;
-        }
-
-        $this->info("Всего вакансий: {$count}");
-        $this->info('Запрашиваю полный список...');
-
-        $fullResponse = $this->sendVacancyRequest(1, $count);
-        if (!$fullResponse->ok()) {
-            $this->error('Ошибка запроса вакансий: HTTP ' . $fullResponse->status());
-            return self::FAILURE;
-        }
-
-        $items = $fullResponse->json()['data'] ?? [];
-        if (empty($items)) {
-            $this->warn('Вакансии не найдены.');
+        $items = $this->collectVacancyPages();
+        if ($items === null) {
             return self::FAILURE;
         }
 
@@ -81,39 +66,111 @@ class CollectVacancies extends Command
         $this->xmlFormatter->createXmlFeed($entities, self::HOST, $outPath);
 
         $this->info("XML сформирован: {$outPath}");
+
         return self::SUCCESS;
+    }
+
+    private function collectVacancyPages(): ?array
+    {
+        $items = [];
+        $expectedCount = null;
+        $expectedPages = null;
+        $page = 1;
+
+        do {
+            $response = $this->sendVacancyRequest($page, self::LIST_PAGE_SIZE);
+            if (!$response->ok()) {
+                $this->error("Ошибка запроса страницы {$page}: HTTP " . $response->status());
+
+                return null;
+            }
+
+            $payload = $response->json();
+            $meta = is_array($payload) ? ($payload['meta'] ?? null) : null;
+            $pageItems = is_array($payload) ? ($payload['data'] ?? null) : null;
+            if (!is_array($meta) || !is_array($pageItems) || $pageItems === []) {
+                $this->error("Неполная или некорректная страница вакансий: {$page}");
+
+                return null;
+            }
+
+            $positiveInteger = ['options' => ['min_range' => 1]];
+            $count = filter_var($meta['count'] ?? null, FILTER_VALIDATE_INT, $positiveInteger);
+            $pages = filter_var($meta['pages'] ?? null, FILTER_VALIDATE_INT, $positiveInteger);
+            $reportedPage = filter_var($meta['page'] ?? null, FILTER_VALIDATE_INT, $positiveInteger);
+
+            if ($count === false || $pages === false || $reportedPage !== $page) {
+                $this->error("Неполная или некорректная страница вакансий: {$page}");
+
+                return null;
+            }
+
+            if ($expectedCount === null) {
+                $expectedCount = $count;
+                $expectedPages = $pages;
+                $this->info("Всего вакансий: {$expectedCount}, страниц: {$expectedPages}");
+            } elseif ($count !== $expectedCount || $pages !== $expectedPages) {
+                $this->error('Каталог вакансий изменился во время обхода; XML не сформирован.');
+
+                return null;
+            }
+
+            foreach ($pageItems as $item) {
+                $id = is_array($item)
+                    ? filter_var($item['id'] ?? null, FILTER_VALIDATE_INT, $positiveInteger)
+                    : false;
+                if ($id === false || isset($items[$id])) {
+                    $this->error("Некорректный или повторный ID вакансии на странице {$page}");
+
+                    return null;
+                }
+
+                $items[$id] = $item;
+            }
+
+            $this->line("Страница {$page}/{$expectedPages}: получено " . count($pageItems) . ', всего ' . count($items));
+            $page++;
+        } while ($page <= $expectedPages);
+
+        if (count($items) !== $expectedCount) {
+            $this->error("Неполный каталог вакансий: ожидалось {$expectedCount}, получено " . count($items));
+
+            return null;
+        }
+
+        return array_values($items);
     }
 
     private function sendVacancyRequest(int $page, int $perPage)
     {
         return $this->rzhdHttpClient()->get(self::BASE_URL, [
-            'page'     => $page,
+            'page' => $page,
             'per_page' => $perPage,
-            'sort'     => 'date_desc',
+            'sort' => 'date_desc',
         ]);
     }
 
     private function normalizeRow(array $item): array
     {
         return [
-            'id'              => $item['id'] ?? null,
-            'position_id'     => $item['position_id'] ?? null,
-            'position_title'  => $item['position_title'] ?? null,
-            'salary_from'     => $item['salary_from'] ?? null,
-            'salary_to'       => $item['salary_to'] ?? null,
-            'salary_month'    => $item['salary_month'] ?? null,
-            'schedule'        => $item['schedule'] ?? null,
-            'experience'      => $item['experience'] ?? null,
+            'id' => $item['id'] ?? null,
+            'position_id' => $item['position_id'] ?? null,
+            'position_title' => $item['position_title'] ?? null,
+            'salary_from' => $item['salary_from'] ?? null,
+            'salary_to' => $item['salary_to'] ?? null,
+            'salary_month' => $item['salary_month'] ?? null,
+            'schedule' => $item['schedule'] ?? null,
+            'experience' => $item['experience'] ?? null,
             'employment_type' => $item['employment_type'] ?? null,
-            'status'          => $item['status'] ?? null,
-            'published_at'    => $item['published_at'] ?? null,
-            'locality_id'     => $item['locality_id'] ?? null,
-            'locality_name'   => $item['locality_name'] ?? null,
+            'status' => $item['status'] ?? null,
+            'published_at' => $item['published_at'] ?? null,
+            'locality_id' => $item['locality_id'] ?? null,
+            'locality_name' => $item['locality_name'] ?? null,
             'direction_title' => $item['direction_title'] ?? null,
-            'speciality_title'=> $item['speciality_title'] ?? null,
-            'latitude'        => $item['latitude'] ?? null,
-            'longitude'       => $item['longitude'] ?? null,
-            'url'             => 'https://team.rzd.ru/career/vacancies/' . ($item['id'] ?? ''),
+            'speciality_title' => $item['speciality_title'] ?? null,
+            'latitude' => $item['latitude'] ?? null,
+            'longitude' => $item['longitude'] ?? null,
+            'url' => 'https://team.rzd.ru/career/vacancies/' . ($item['id'] ?? ''),
         ];
     }
 
@@ -123,10 +180,11 @@ class CollectVacancies extends Command
             $title = $row['position_title'];
             if ($title && isset($this->detailByTitle[$title])) {
                 $rows[$index]['detail'] = $this->detailByTitle[$title];
+
                 continue;
             }
 
-            $detail = $this->fetchVacancyDetail((int)$row['id']);
+            $detail = $this->fetchVacancyDetail((int) $row['id']);
             if ($title) {
                 $this->detailByTitle[$title] = $detail;
             }
@@ -157,9 +215,9 @@ class CollectVacancies extends Command
     {
         return Http::withoutVerifying()->withHeaders([
             'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Accept'     => 'application/json, text/plain, */*',
-            'Origin'     => 'https://team.rzd.ru',
-            'Referer'    => 'https://team.rzd.ru/',
+            'Accept' => 'application/json, text/plain, */*',
+            'Origin' => 'https://team.rzd.ru',
+            'Referer' => 'https://team.rzd.ru/',
         ]);
     }
 
