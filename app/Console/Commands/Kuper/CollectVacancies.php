@@ -193,6 +193,8 @@ class CollectVacancies extends Command
         ],
     ];
 
+    private const CITY_SOURCE_URL = 'https://kuper.ru/rabota';
+
     private const CITY_CACHE_PATH = 'app/kuper/cities.json';
 
     private const DEFAULT_CITY_NAMES = [
@@ -715,6 +717,7 @@ class CollectVacancies extends Command
             return self::SUCCESS;
         }
 
+        $this->info('Городов для генерации: ' . count($cities));
         $entities = $this->buildFeedEntities($cities);
         if (empty($entities)) {
             $this->warn('Не удалось сформировать сущности для XML.');
@@ -722,7 +725,8 @@ class CollectVacancies extends Command
             return self::SUCCESS;
         }
 
-        $this->xmlFormatter->createXmlFeed($entities, 'crowd.yandex.ru', $xmlPath);
+        $this->xmlFormatter->createXmlFeed($entities, 'kuper.ru', $xmlPath);
+        $this->info('Сформировано вакансий: ' . count($entities));
         $this->info("XML сформирован: {$xmlPath}");
 
         return self::SUCCESS;
@@ -770,12 +774,12 @@ class CollectVacancies extends Command
     {
         $cookieJar = new CookieJar();
 
-        $this->info('Загружаю страницу https://kuper.ru/rabota/velokurer ...');
+        $this->info('Загружаю страницу ' . self::CITY_SOURCE_URL . ' ...');
         $this->sleepRandomDelay();
         $resp = $this->makeRequest($cookieJar)
-            ->get('https://kuper.ru/rabota/velokurer');
+            ->get(self::CITY_SOURCE_URL);
         if (!$resp->ok()) {
-            throw new \RuntimeException('Не удалось загрузить страницу велокурьера.');
+            throw new \RuntimeException('Не удалось загрузить страницу работы в Купере: HTTP ' . $resp->status());
         }
 
         $html = $resp->body();
@@ -807,7 +811,7 @@ class CollectVacancies extends Command
 
             $this->info("Проверяю chunk {$url}");
             $this->sleepRandomDelay();
-            $chunkResp = $this->makeRequest($cookieJar, 'https://kuper.ru/rabota/velokurer')
+            $chunkResp = $this->makeRequest($cookieJar, self::CITY_SOURCE_URL)
                 ->get($url);
             if (!$chunkResp->ok()) {
                 continue;
