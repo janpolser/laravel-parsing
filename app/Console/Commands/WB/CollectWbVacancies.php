@@ -3,6 +3,7 @@
 namespace App\Console\Commands\WB;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Support\VacancyTextUrls;
 use GuzzleHttp\Cookie\CookieJar;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
@@ -11,21 +12,25 @@ use Illuminate\Support\Facades\Http;
 class CollectWbVacancies extends Command
 {
     protected $signature = 'wb:collect-wb-vacancies
-        {--limit=500 : Размер страницы (макс. 1000)}
+        {--limit=50 : Запрашиваемый размер страницы (API может вернуть меньше)}
         {--start-offset=0 : С какого offset начинать}
-        {--max-pages=1 : Сколько страниц тянуть (1 — только один запрос)}
+        {--max-pages=0 : Максимум страниц, 0 — собрать весь каталог}
         {--outfile=wb_vacancies : Базовое имя xml-файла в storage/app}';
 
     protected $description = 'Собирает вакансии Wildberries и формирует YVL-совместимый XML';
 
     private const BASE_URL = 'https://career.wb.ru/crm-api/api/v1/pub/vacancies';
+
     private const DETAIL_URL = 'https://career.wb.ru/crm-api/api/v1/pub/vacancies/';
+
     private const HOST = 'career.wb.ru';
+
     private const TIMEZONE = 'Europe/Moscow';
 
     private CookieJar $cookieJar;
+
     private array $detailCache = [];
-    private array $detailByName = [];
+
     private YandexFeedXmlFormat $xmlFormatter;
 
     public function __construct(YandexFeedXmlFormat $xmlFormatter)
@@ -37,85 +42,152 @@ class CollectWbVacancies extends Command
 
     public function handle(): int
     {
-        $limit       = (int) $this->option('limit');
-        $offset      = (int) $this->option('start-offset');
-        $maxPages    = (int) $this->option('max-pages');
+        $limit = (int) $this->option('limit');
+        $offset = (int) $this->option('start-offset');
+        $maxPages = (int) $this->option('max-pages');
         $outFileName = (string) $this->option('outfile') . today()->toDateString() . '.xml';
 
         if ($limit < 1 || $limit > 1000) {
             $this->error('Параметр --limit должен быть в диапазоне 1..1000');
+
             return self::INVALID;
         }
-        if ($maxPages < 1) {
-            $this->error('Параметр --max-pages должен быть >= 1');
+        if ($offset < 0 || $maxPages < 0) {
+            $this->error('Параметры --start-offset и --max-pages должны быть >= 0');
+
             return self::INVALID;
         }
 
-        $this->cookieJar = new CookieJar();
+        $this->cookieJar = new CookieJar;
+        $this->detailCache = [];
 
+        try {
+            $this->warmupSession();
+            $normalizedRows = $this->collectPages($limit, $offset, $maxPages);
+
+            if ($normalizedRows === []) {
+                $this->error('Каталог пуст — предыдущий XML сохранён.');
+
+                return self::FAILURE;
+            }
+
+            $this->attachDetails($normalizedRows);
+            $entities = array_map([$this, 'mapToEntity'], $normalizedRows);
+            foreach ($entities as $index => $entity) {
+                $entity = VacancyTextUrls::extractFromVacancy($entity);
+                if (empty($entity['description'])) {
+                    throw new \RuntimeException('Нет описания вакансии ID=' . $normalizedRows[$index]['id']);
+                }
+                $entities[$index] = $entity;
+            }
+
+            $outPath = storage_path('app/public/wb/' . $outFileName);
+            $this->xmlFormatter->createXmlFeed($entities, self::HOST, $outPath);
+            $this->info('Собрано уникальных вакансий: ' . count($entities));
+            $this->info("XML сформирован: {$outPath}");
+
+            return self::SUCCESS;
+        } catch (\Throwable $e) {
+            $this->error('Сбор WB не завершён: ' . $e->getMessage());
+
+            return self::FAILURE;
+        }
+    }
+
+    private function warmupSession(): void
+    {
         $this->info('Прогреваю сессию career.wb.ru...');
         $warmup = Http::withOptions([
-                'cookies' => $this->cookieJar,
-                'curl' => [
-                    CURLOPT_TIMEOUT => 20,
-                    CURLOPT_CONNECTTIMEOUT => 10,
-                    CURLOPT_FOLLOWLOCATION => true,
-                    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
-                ],
-            ])
+            'cookies' => $this->cookieJar,
+            'curl' => [
+                CURLOPT_TIMEOUT => 20,
+                CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
+            ],
+        ])
             ->withHeaders([
                 'User-Agent' => 'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
-                'Accept'     => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Referer'    => 'https://career.wb.ru/',
-                'Origin'     => 'https://career.wb.ru',
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer' => 'https://career.wb.ru/',
+                'Origin' => 'https://career.wb.ru',
             ])
             ->get('https://career.wb.ru/');
 
         $this->info("Warmup status: {$warmup->status()}");
+    }
 
+    private function collectPages(int $limit, int $offset, int $maxPages): array
+    {
         $normalizedRows = [];
+        $seenIds = [];
         $pagesFetched = 0;
+        $total = null;
+        $startOffset = $offset;
 
-        while ($pagesFetched < $maxPages) {
+        while ($maxPages === 0 || $pagesFetched < $maxPages) {
             $resp = $this->fetchVacancyPage($limit, $offset);
             if (!$resp->ok()) {
-                $this->error("HTTP {$resp->status()} при запросе оффсета={$offset}");
-                return self::FAILURE;
+                throw new \RuntimeException("HTTP {$resp->status()} при запросе offset={$offset}");
             }
 
             $json = $resp->json();
-            $items = $this->extractItems($json);
+            $data = is_array($json) ? ($json['data'] ?? null) : null;
+            $range = is_array($data) ? ($data['range'] ?? null) : null;
+            $items = is_array($data) ? ($data['items'] ?? null) : null;
+            if (!is_array($range) || !is_array($items) || !array_is_list($items)
+                || !isset($range['count'], $range['offset'])
+                || !is_int($range['count']) || $range['count'] < 0
+                || !is_int($range['offset']) || $range['offset'] !== $offset) {
+                throw new \RuntimeException("Некорректный ответ списка на offset={$offset}");
+            }
 
-            if (empty($items)) {
-                $this->info("Пусто на offset={$offset}. Останавливаюсь.");
+            $total ??= $range['count'];
+            if ($range['count'] !== $total) {
+                throw new \RuntimeException('Количество вакансий изменилось во время обхода');
+            }
+            if ($items === []) {
+                if ($offset < $total) {
+                    throw new \RuntimeException("Пустая страница на offset={$offset}, всего вакансий: {$total}");
+                }
                 break;
             }
 
             foreach ($items as $row) {
-                if (is_array($row)) {
-                    $normalizedRows[] = $this->normalizeRow($row);
+                $id = is_array($row) ? ($row['id'] ?? null) : null;
+                if ((!is_int($id) && !is_string($id)) || !ctype_digit((string) $id) || (int) $id < 1
+                    || !is_string($row['name'] ?? null) || trim($row['name']) === '') {
+                    throw new \RuntimeException("Некорректная вакансия на offset={$offset}");
                 }
+                if (isset($seenIds[(int) $id])) {
+                    throw new \RuntimeException("API повторил вакансию ID={$id}");
+                }
+                $seenIds[(int) $id] = true;
+                $normalizedRows[] = $this->normalizeRow($row);
             }
 
-            $this->line("Страница: offset={$offset}, получено: " . count($items));
-            $offset += $limit;
+            $this->line("Страница: offset={$offset}, получено: " . count($items) . ", всего: {$total}");
+            // The API caps its response at 50 even when range.limit echoes 500.
+            $offset += count($items);
             $pagesFetched++;
+            if ($offset > $total) {
+                throw new \RuntimeException('API вернул больше вакансий, чем указано в range.count');
+            }
+            if ($offset === $total) {
+                break;
+            }
         }
 
-        if (empty($normalizedRows)) {
-            $this->warn('Данных нет — писать нечего.');
-            return self::SUCCESS;
+        if (($startOffset > 0 || $offset < $total) && $this->option('outfile') === 'wb_vacancies') {
+            throw new \RuntimeException('Частичный обход не заменяет полный фид: задайте отдельное имя через --outfile');
+        }
+        if ($offset < $total) {
+            $this->warn("Достигнут --max-pages={$maxPages}: собрана только часть каталога");
+        } elseif (count($normalizedRows) !== max(0, $total - $startOffset)) {
+            throw new \RuntimeException('Не удалось собрать все уникальные вакансии каталога');
         }
 
-        $this->attachDetailsByName($normalizedRows);
-
-        $entities = array_filter(array_map([$this, 'mapToEntity'], $normalizedRows));
-
-        $outPath = storage_path('app/public/wb/' . $outFileName);
-        $this->xmlFormatter->createXmlFeed($entities, self::HOST, $outPath);
-
-        $this->info("XML сформирован: {$outPath}");
-        return self::SUCCESS;
+        return $normalizedRows;
     }
 
     private function fetchVacancyPage(int $limit, int $offset)
@@ -137,19 +209,6 @@ class CollectWbVacancies extends Command
             'limit' => $limit,
             'offset' => $offset,
         ]);
-    }
-
-    private function extractItems(array $json): array
-    {
-        if (!empty($json['data']['items']) && is_array($json['data']['items'])) {
-            return $json['data']['items'];
-        }
-
-        if (!empty($json['items']) && is_array($json['items'])) {
-            return $json['items'];
-        }
-
-        return [];
     }
 
     private function normalizeRow(array $item): array
@@ -175,20 +234,10 @@ class CollectWbVacancies extends Command
         ];
     }
 
-    private function attachDetailsByName(array &$rows): void
+    private function attachDetails(array &$rows): void
     {
         foreach ($rows as $index => $row) {
-            $name = $row['name'];
-            if ($name && isset($this->detailByName[$name])) {
-                $rows[$index]['detail'] = $this->detailByName[$name];
-                continue;
-            }
-
-            $detail = $this->fetchVacancyDetail((int)$row['id']);
-            if ($name) {
-                $this->detailByName[$name] = $detail;
-            }
-            $rows[$index]['detail'] = $detail;
+            $rows[$index]['detail'] = $this->fetchVacancyDetail((int) $row['id']);
         }
     }
 
@@ -217,8 +266,15 @@ class CollectWbVacancies extends Command
             'Origin' => 'https://career.wb.ru',
         ])->get(self::DETAIL_URL . $id);
 
-        $data = $response->json()['data'] ?? [];
-        return $this->detailCache[$id] = is_array($data) ? $data : [];
+        if (!$response->ok()) {
+            throw new \RuntimeException("HTTP {$response->status()} при запросе вакансии ID={$id}");
+        }
+        $data = $response->json()['data'] ?? null;
+        if (!is_array($data) || $data === []) {
+            throw new \RuntimeException("Некорректные детали вакансии ID={$id}");
+        }
+
+        return $this->detailCache[$id] = $data;
     }
 
     private function mapToEntity(array $row): array
@@ -261,6 +317,7 @@ class CollectWbVacancies extends Command
             if (is_array($value) && empty($value)) {
                 return false;
             }
+
             return true;
         });
     }
@@ -319,6 +376,7 @@ class CollectWbVacancies extends Command
         if (!empty($row['direction_role_title'])) {
             $category['specialization'] = $row['direction_role_title'];
         }
+
         return $category;
     }
 
@@ -364,6 +422,7 @@ class CollectWbVacancies extends Command
     private function formatNow(): string
     {
         $now = Carbon::now(self::TIMEZONE);
+
         return $now->format('Y-m-d H:i:s') . ' GMT' . $this->formatOffset($now);
     }
 
