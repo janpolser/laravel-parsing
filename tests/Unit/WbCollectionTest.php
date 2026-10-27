@@ -161,6 +161,45 @@ test('wb rejects invalid pagination options before making requests', function (a
     'page size exceeds supported range' => [['--limit' => 1001]],
 ]);
 
+test('wb skips a confirmed missing card and exports the remaining vacancy', function () {
+    Http::fake([
+        'https://career.wb.ru/' => Http::response('<html/>'),
+        'https://career.wb.ru/crm-api/api/v1/pub/vacancies?*' => Http::response(wbCollectionPage([1, 2], 0, 2)),
+        'https://career.wb.ru/crm-api/api/v1/pub/vacancies/1' => Http::response([], 404),
+        'https://career.wb.ru/crm-api/api/v1/pub/vacancies/2' => Http::response([
+            'status' => 200,
+            'data' => ['id' => 2, 'description' => 'Обязанности второй вакансии'],
+        ]),
+    ]);
+
+    $this->artisan('wb:collect-wb-vacancies')
+        ->expectsOutputToContain('404')
+        ->assertSuccessful();
+
+    $xml = simplexml_load_file($this->wbOutputPath);
+    expect($xml->vacancies->vacancy)->toHaveCount(1)
+        ->and((string) $xml->vacancies->vacancy[0]->url)->toBe('https://career.wb.ru/vacancies/2')
+        ->and((string) $xml->vacancies->vacancy[0]->description)->toBe('Обязанности второй вакансии');
+    Http::assertSentCount(4);
+});
+
+test('wb preserves the previous feed when all listed cards return not found', function () {
+    File::ensureDirectoryExists(dirname($this->wbOutputPath));
+    file_put_contents($this->wbOutputPath, '<source>previous feed</source>');
+
+    Http::fake([
+        'https://career.wb.ru/' => Http::response('<html/>'),
+        'https://career.wb.ru/crm-api/api/v1/pub/vacancies?*' => Http::response(wbCollectionPage([1, 2], 0, 2)),
+        'https://career.wb.ru/crm-api/api/v1/pub/vacancies/*' => Http::response([], 404),
+    ]);
+
+    $this->artisan('wb:collect-wb-vacancies')->assertFailed();
+
+    expect(file_get_contents($this->wbOutputPath))->toBe('<source>previous feed</source>')
+        ->and(glob(dirname($this->wbOutputPath).'/*.tmp'))->toBe([]);
+    Http::assertSentCount(4);
+});
+
 test('wb preserves the previous feed when a vacancy detail cannot be published', function (array $detail, int $status) {
     File::ensureDirectoryExists(dirname($this->wbOutputPath));
     file_put_contents($this->wbOutputPath, '<source>previous feed</source>');
@@ -178,6 +217,7 @@ test('wb preserves the previous feed when a vacancy detail cannot be published',
         ->and(glob(dirname($this->wbOutputPath).'/*.tmp'))->toBe([]);
 })->with([
     'HTTP failure' => [[], 503],
+    'HTTP forbidden is not treated as a deleted card' => [[], 403],
     'missing description' => [['status' => 200, 'data' => ['id' => 2]], 200],
     'description contains only a URL removed by XML formatting' => [[
         'status' => 200,

@@ -71,7 +71,11 @@ class CollectWbVacancies extends Command
                 return self::FAILURE;
             }
 
-            $this->attachDetails($normalizedRows);
+            $this->info('В списке уникальных вакансий: ' . count($normalizedRows));
+            $normalizedRows = $this->attachDetails($normalizedRows);
+            if ($normalizedRows === []) {
+                throw new \RuntimeException('Не найдена ни одна карточка вакансии — предыдущий XML сохранён');
+            }
             $entities = array_map([$this, 'mapToEntity'], $normalizedRows);
             foreach ($entities as $index => $entity) {
                 $entity = VacancyTextUrls::extractFromVacancy($entity);
@@ -234,14 +238,27 @@ class CollectWbVacancies extends Command
         ];
     }
 
-    private function attachDetails(array &$rows): void
+    private function attachDetails(array $rows): array
     {
-        foreach ($rows as $index => $row) {
-            $rows[$index]['detail'] = $this->fetchVacancyDetail((int) $row['id']);
+        $availableRows = [];
+        $missing = 0;
+        foreach ($rows as $row) {
+            $detail = $this->fetchVacancyDetail((int) $row['id']);
+            if ($detail === null) {
+                $missing++;
+                $this->warn('Карточка вакансии ID=' . $row['id'] . ' не найдена (HTTP 404), пропускаю');
+
+                continue;
+            }
+            $row['detail'] = $detail;
+            $availableRows[] = $row;
         }
+        $this->info('Доступных карточек: ' . count($availableRows) . "; не найдены (HTTP 404): {$missing}");
+
+        return $availableRows;
     }
 
-    private function fetchVacancyDetail(int $id): array
+    private function fetchVacancyDetail(int $id): ?array
     {
         if ($id === 0) {
             return [];
@@ -266,6 +283,9 @@ class CollectWbVacancies extends Command
             'Origin' => 'https://career.wb.ru',
         ])->get(self::DETAIL_URL . $id);
 
+        if ($response->status() === 404) {
+            return null;
+        }
         if (!$response->ok()) {
             throw new \RuntimeException("HTTP {$response->status()} при запросе вакансии ID={$id}");
         }
