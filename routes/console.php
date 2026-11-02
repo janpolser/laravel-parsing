@@ -68,7 +68,7 @@ Schedule::command('kuper:collect-vacancies')
 
 // HireHi
 Schedule::command('hirehi:parse-vacancies')
-    ->dailyAt('04:00')
+    ->cron('0 4 * * 1,4')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'hirehi']);

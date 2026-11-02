@@ -17,7 +17,7 @@ class ParseVacancies extends Command
                             {--max-pages=0 : Максимум страниц (0 - все)}
                             {--start-page=1 : Первая страница для выборочного обновления}
                             {--end-page=0 : Последняя страница для выборочного обновления (0 - до конца)}
-                            {--request-delay-ms=1500 : Минимальная пауза между запросами к HireHi API, мс}
+                            {--request-delay-ms=3000 : Минимальная пауза между запросами к HireHi API, мс}
                             {--max-retries=5 : Повторов для 429 и временных ошибок API}
                             {--retry-delay-seconds=60 : Начальная пауза перед повтором, секунд}
                             {--proxy=* : Optional HTTP/SOCKS proxy URL, can be repeated}';
@@ -51,7 +51,7 @@ class ParseVacancies extends Command
         '(' => '', ')' => '', '[' => '', ']' => '', '{' => '', '}' => '',
     ];
 
-    private int $requestDelayMs = 1500;
+    private int $requestDelayMs = 3000;
 
     private int $maxRetries = 5;
 
