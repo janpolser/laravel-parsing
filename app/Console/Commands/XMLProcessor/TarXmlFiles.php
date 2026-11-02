@@ -7,7 +7,9 @@ use Illuminate\Support\Facades\File;
 
 class TarXmlFiles extends Command
 {
-    protected $signature = 'xml:tar {source? : Optional source folder to process}';
+    protected $signature = 'xml:tar
+        {source? : Optional source folder to process}
+        {--exclude=* : Sources to skip when processing every folder}';
 
     protected $description = 'Создает и атомарно публикует TAR из XML файлов.';
 
@@ -37,8 +39,13 @@ class TarXmlFiles extends Command
             return $this->process($sources[$source], $source);
         }
 
+        $excluded = array_fill_keys(array_map('strval', (array) $this->option('exclude')), true);
+
         $exitCode = self::SUCCESS;
         foreach ($sources as $prefix => $folder) {
+            if (isset($excluded[$prefix])) {
+                continue;
+            }
             if ($this->process($folder, $prefix) !== self::SUCCESS) {
                 $exitCode = self::FAILURE;
             }
@@ -209,7 +216,7 @@ class TarXmlFiles extends Command
     }
 
     /**
-     * @param array<string, int> $expectedEntries
+     * @param  array<string, int>  $expectedEntries
      */
     private function assertArchiveIsComplete(string $tarPath, array $expectedEntries): void
     {

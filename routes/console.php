@@ -67,11 +67,16 @@ Schedule::command('kuper:collect-vacancies')
     ->withoutOverlapping();
 
 // HireHi
-// The command fetches vacancy details sequentially, so run it before the
-// main morning batch. The generic XML archiver runs at 07:00.
 Schedule::command('hirehi:parse-vacancies')
     ->dailyAt('04:00')
     ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'hirehi']);
+        if ($exitCode !== 0) {
+            Log::error('HireHi feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->runInBackground()
     ->withoutOverlapping();
 
 // Gossluzhba
@@ -86,7 +91,7 @@ Schedule::command('xml:tar gossluzhba')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
-Schedule::command('xml:tar')
+Schedule::command('xml:tar --exclude=hirehi')
     ->dailyAt('07:00')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();

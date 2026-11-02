@@ -19,7 +19,8 @@ class ParseVacancies extends Command
                             {--end-page=0 : Последняя страница для выборочного обновления (0 - до конца)}
                             {--request-delay-ms=1500 : Минимальная пауза между запросами к HireHi API, мс}
                             {--max-retries=5 : Повторов для 429 и временных ошибок API}
-                            {--retry-delay-seconds=60 : Начальная пауза перед повтором, секунд}';
+                            {--retry-delay-seconds=60 : Начальная пауза перед повтором, секунд}
+                            {--proxy=* : Optional HTTP/SOCKS proxy URL, can be repeated}';
 
     protected $description = 'Парсинг вакансий с hirehi.ru и генерация XML-фида';
 
@@ -51,9 +52,16 @@ class ParseVacancies extends Command
     ];
 
     private int $requestDelayMs = 1500;
+
     private int $maxRetries = 5;
+
     private int $retryDelaySeconds = 60;
+
     private ?float $lastRequestAt = null;
+
+    private array $proxies = [];
+
+    private int $proxyCursor = 0;
 
     public function handle(YandexFeedXmlFormat $xml)
     {
@@ -68,6 +76,8 @@ class ParseVacancies extends Command
         $this->requestDelayMs = max(250, (int) $this->option('request-delay-ms'));
         $this->maxRetries = max(0, (int) $this->option('max-retries'));
         $this->retryDelaySeconds = max(5, (int) $this->option('retry-delay-seconds'));
+        $this->proxies = $this->resolveProxies();
+        $this->proxyCursor = 0;
 
         date_default_timezone_set('Europe/Moscow');
         ini_set('memory_limit', '8G');
@@ -76,7 +86,7 @@ class ParseVacancies extends Command
 
         try {
             $baseUrl = 'https://hirehi.ru/api/search/jobs';
-            
+
             // Первый запрос с include_counts=true
             $queryParams = [
                 'page' => 1,
@@ -90,16 +100,18 @@ class ParseVacancies extends Command
                 $queryParams['search'] = $search;
             }
 
-            $this->info("Начинаем парсинг вакансий...");
+            $this->info('Начинаем парсинг вакансий...');
             $this->info("Категория: {$category}");
             if ($search) {
                 $this->info("Поиск: {$search}");
             }
+            $this->info('Маршрутов HireHi: ' . (empty($this->proxies) ? 'direct' : count($this->proxies)));
 
             $response = $this->requestHireHi($baseUrl, $queryParams, $timeout);
 
             if ($response === null || $response->failed()) {
                 $this->error('Ошибка при получении данных: ' . ($response?->status() ?? 'network error'));
+
                 return Command::FAILURE;
             }
 
@@ -108,7 +120,7 @@ class ParseVacancies extends Command
             // Подсчитываем общее количество через filter_counts.format или initial_filter_counts.format
             $formatCounts = $data['filter_counts']['format'] ?? $data['initial_filter_counts']['format'] ?? [];
             $totalCount = 0;
-            
+
             if (!empty($formatCounts)) {
                 $hybridCount = (int) ($formatCounts['гибрид'] ?? 0);
                 $officeCount = (int) ($formatCounts['офис'] ?? 0);
@@ -121,11 +133,12 @@ class ParseVacancies extends Command
 
             if ($totalCount === 0) {
                 $this->error('Нет вакансий для обработки');
+
                 return Command::FAILURE;
             }
 
             $totalPages = (int) ceil($totalCount / $perPage);
-            
+
             // Если задан лимит страниц
             if ($maxPages > 0 && $totalPages > $maxPages) {
                 $totalPages = $maxPages;
@@ -139,12 +152,12 @@ class ParseVacancies extends Command
             }
             if ($startPage > $totalPages) {
                 $this->error('Первая страница выходит за пределы доступного диапазона');
+
                 return Command::FAILURE;
             }
 
-            $editedVacancies = [];
-            $processedCount = 0;
-            $descriptionCache = [];
+            $vacanciesById = [];
+            $duplicateCount = 0;
 
             $progressBar = $this->output->createProgressBar($totalPages - $startPage + 1);
             $progressBar->start();
@@ -155,123 +168,142 @@ class ParseVacancies extends Command
             for ($i = $startPage; $i <= $totalPages; $i++) {
                 try {
                     $queryParams['page'] = $i;
-                    
+
                     $response = $this->requestHireHi($baseUrl, $queryParams, $timeout);
 
                     if ($response === null || $response->failed()) {
-                        $this->warn("Ошибка при запросе страницы $i: " . ($response?->status() ?? 'network error'));
-                        $progressBar->advance();
-                        continue;
+                        throw new \RuntimeException("Ошибка при запросе страницы $i: " . ($response?->status() ?? 'network error'));
                     }
 
                     $pageData = $response->json();
 
                     // В ответе поле 'jobs', а не 'items'
                     if (!isset($pageData['jobs']) || empty($pageData['jobs'])) {
-                        $this->warn("Нет данных на странице $i");
-                        $progressBar->advance();
-                        continue;
+                        throw new \RuntimeException("Нет данных на странице $i");
                     }
 
                     foreach ($pageData['jobs'] as $vacancy) {
                         $vacancyId = $vacancy['id'] ?? null;
                         $vacancyName = $vacancy['title'] ?? 'Без названия';
-                        
+
                         if (!$vacancyId) {
                             continue;
                         }
 
-                        // Формируем URL
-                        $nameSlug = $this->slugify($vacancyName);
-                        $vacancyUrl = "https://hirehi.ru/{$categorySlug}/{$nameSlug}-{$vacancyId}";
+                        $vacancyId = (string) $vacancyId;
+                        if (isset($vacanciesById[$vacancyId])) {
+                            $duplicateCount++;
 
-                        // Парсим дату создания
-                        $creationDate = $this->parseDate($vacancy['created_at'] ?? null);
-
-                        // Получаем описание (с кэшированием по названию)
-                        $cacheKey = $vacancyName;
-                        if (isset($descriptionCache[$cacheKey])) {
-                            $description = $descriptionCache[$cacheKey];
-                        } else {
-                            $description = $this->getVacancyDescription($vacancyId);
-                            $descriptionCache[$cacheKey] = $description;
+                            continue;
                         }
 
-                        // Замена NDA на "Анонимный Работодатель"
-                        $companyName = $vacancy['company'] ?? 'HireHi';
-                        $companyName = $this->anonymizeCompany($companyName);
-
-                        $editedVacancy = [
-                            'url' => $vacancyUrl,
-                            'mobile_url' => $vacancyUrl,
-                            'creation_date' => $creationDate,
-                            'job_name' => $vacancyName,
-                            'description' => $description,
-                            'company_name' => $companyName,
-                            'hr_agency' => 'false',
-                            'category' => ['industry' => $category],
-                        ];
-
-                        // Зарплата - форматируем в читаемый вид
-                        $salaryStr = $vacancy['salary'] ?? '';
-                        $editedVacancy['salary'] = $this->formatSalary($salaryStr);
-                        $editedVacancy['currency'] = 'RUB';
-
-                        // Формат работы (строка типа "офис Ереван", "удалённо", "гибрид Алматы")
-                        $workFormat = $vacancy['format'] ?? '';
-                        $editedVacancy['employment'] = $this->detectEmployment($workFormat);
-                        $editedVacancy['schedule'] = $workFormat;
-
-                        // Уровень (junior/middle/senior/lead)
-                        if (!empty($vacancy['level'])) {
-                            $editedVacancy['experience'] = $this->mapExperience($vacancy['level']);
-                        }
-
-                        // Адрес берем из поля format (там "тип город")
-                        $location = $this->extractLocation($workFormat);
-                        $editedVacancy['addresses']['address']['location'] = $location;
-
-                        $editedVacancies[] = $editedVacancy;
-                        $processedCount++;
+                        $vacanciesById[$vacancyId] = $vacancy;
                     }
 
                 } catch (ConnectionException $e) {
-                    $this->warn("Таймаут на странице $i: " . $e->getMessage());
+                    throw new \RuntimeException("Таймаут на странице $i: " . $e->getMessage(), 0, $e);
                 } catch (\Exception $e) {
-                    $this->warn("Ошибка на странице $i: " . $e->getMessage());
+                    throw new \RuntimeException("Ошибка на странице $i: " . $e->getMessage(), 0, $e);
                 }
 
                 $progressBar->advance();
-
             }
 
             $progressBar->finish();
             $this->newLine(2);
 
-            if (empty($editedVacancies)) {
+            if (empty($vacanciesById)) {
                 $this->error('Не удалось собрать ни одной вакансии');
+
                 return Command::FAILURE;
             }
+
+            $this->info('Список зафиксирован, уникальных вакансий: ' . count($vacanciesById));
+
+            $editedVacancies = [];
+            $descriptionCache = [];
+
+            foreach ($vacanciesById as $vacancyId => $vacancy) {
+                $vacancyName = $vacancy['title'] ?? 'Без названия';
+
+                // Формируем URL
+                $nameSlug = $this->slugify($vacancyName);
+                $vacancyUrl = "https://hirehi.ru/{$categorySlug}/{$nameSlug}-{$vacancyId}";
+
+                // Парсим дату создания
+                $creationDate = $this->parseDate($vacancy['created_at'] ?? null);
+
+                // Получаем описание (с кэшированием по ID вакансии)
+                $cacheKey = $vacancyId;
+                if (isset($descriptionCache[$cacheKey])) {
+                    $description = $descriptionCache[$cacheKey];
+                } else {
+                    $description = $this->getVacancyDescription($vacancyId);
+                    $descriptionCache[$cacheKey] = $description;
+                }
+
+                // Замена NDA на "Анонимный Работодатель"
+                $companyName = $vacancy['company'] ?? 'HireHi';
+                $companyName = $this->anonymizeCompany($companyName);
+
+                $editedVacancy = [
+                    'url' => $vacancyUrl,
+                    'mobile_url' => $vacancyUrl,
+                    'creation_date' => $creationDate,
+                    'job_name' => $vacancyName,
+                    'description' => $description,
+                    'company_name' => $companyName,
+                    'hr_agency' => 'false',
+                    'category' => ['industry' => $category],
+                ];
+
+                // Зарплата - форматируем в читаемый вид
+                $salaryStr = $vacancy['salary'] ?? '';
+                $editedVacancy['salary'] = $this->formatSalary($salaryStr);
+                $editedVacancy['currency'] = 'RUB';
+
+                // Формат работы (строка типа "офис Ереван", "удалённо", "гибрид Алматы")
+                $workFormat = $vacancy['format'] ?? '';
+                $editedVacancy['employment'] = $this->detectEmployment($workFormat);
+                $editedVacancy['schedule'] = $workFormat;
+
+                // Уровень (junior/middle/senior/lead)
+                if (!empty($vacancy['level'])) {
+                    $editedVacancy['experience'] = $this->mapExperience($vacancy['level']);
+                }
+
+                // Адрес берем из поля format (там "тип город")
+                $location = $this->extractLocation($workFormat);
+                $editedVacancy['addresses']['address']['location'] = $location;
+
+                $editedVacancies[$vacancyId] = $editedVacancy;
+            }
+
+            $editedVacancies = array_values($editedVacancies);
+            $processedCount = count($editedVacancies);
 
             // Генерация XML
             $filename = 'hirehi_' . $category . '_' . now()->format('Y-m-d_H-i') . '.xml';
             $xmlPath = 'storage/app/public/hirehi/' . $filename;
-            
+
             $xml->createXmlFeed(
-                $editedVacancies, 
-                'https://hirehi.ru/', 
+                $editedVacancies,
+                'https://hirehi.ru/',
                 $xmlPath
             );
 
             $this->info("✅ Готово! Обработано вакансий: {$processedCount}");
+            $this->info("Пропущено дублей по ID: {$duplicateCount}");
             $this->info("💾 Файл сохранён: {$xmlPath}");
 
         } catch (ConnectionException $e) {
             $this->error('Таймаут при подключении к API: ' . $e->getMessage());
+
             return Command::FAILURE;
         } catch (\Exception $e) {
             $this->error('Неожиданная ошибка: ' . $e->getMessage());
             $this->error($e->getTraceAsString());
+
             return Command::FAILURE;
         }
 
@@ -290,27 +322,27 @@ class ParseVacancies extends Command
         }
 
         $data = $response->json();
-            
-            // Собираем описание из детальных полей
-            $parts = [];
-            
-            if (!empty($data['description_details'])) {
-                $parts[] = $this->cleanupHtml($data['description_details']);
-            } elseif (!empty($data['description'])) {
-                $parts[] = $this->cleanupHtml($data['description']);
-            }
 
-            if (!empty($data['requirements_details'])) {
-                $parts[] = '<strong>Требования:</strong><br>' . $this->cleanupHtml($data['requirements_details']);
-            }
+        // Собираем описание из детальных полей
+        $parts = [];
 
-            if (!empty($data['conditions_details'])) {
-                $parts[] = '<strong>Условия:</strong><br>' . $this->cleanupHtml($data['conditions_details']);
-            }
+        if (!empty($data['description_details'])) {
+            $parts[] = $this->cleanupHtml($data['description_details']);
+        } elseif (!empty($data['description'])) {
+            $parts[] = $this->cleanupHtml($data['description']);
+        }
 
-            if (!empty($data['responsibilities_details'])) {
-                $parts[] = '<strong>Обязанности:</strong><br>' . $this->cleanupHtml($data['responsibilities_details']);
-            }
+        if (!empty($data['requirements_details'])) {
+            $parts[] = '<strong>Требования:</strong><br>' . $this->cleanupHtml($data['requirements_details']);
+        }
+
+        if (!empty($data['conditions_details'])) {
+            $parts[] = '<strong>Условия:</strong><br>' . $this->cleanupHtml($data['conditions_details']);
+        }
+
+        if (!empty($data['responsibilities_details'])) {
+            $parts[] = '<strong>Обязанности:</strong><br>' . $this->cleanupHtml($data['responsibilities_details']);
+        }
 
         return implode('<br><br>', $parts);
     }
@@ -318,13 +350,16 @@ class ParseVacancies extends Command
     private function requestHireHi(string $url, array $query = [], int $timeout = 60): ?Response
     {
         $lastResponse = null;
+        $attempts = max($this->maxRetries + 1, count($this->proxies));
 
-        for ($attempt = 0; $attempt <= $this->maxRetries; $attempt++) {
+        for ($attempt = 0; $attempt < $attempts; $attempt++) {
             $this->waitForRequestSlot();
+            $proxy = $this->nextProxy();
 
             try {
                 $response = Http::timeout($timeout)
                     ->acceptJson()
+                    ->withOptions($proxy === null ? [] : ['proxy' => $proxy])
                     ->withHeaders([
                         'User-Agent' => 'Mozilla/5.0 (compatible; vacancy-feed/1.0)',
                         'Referer' => 'https://hirehi.ru/',
@@ -332,30 +367,114 @@ class ParseVacancies extends Command
                     ])
                     ->get($url, $query);
             } catch (ConnectionException $exception) {
-                if ($attempt === $this->maxRetries) {
+                if ($attempt === $attempts - 1) {
                     $this->warn('HireHi network error: ' . $exception->getMessage());
 
                     return null;
                 }
 
-                $this->waitBeforeRetry(null, $attempt + 1, 'network error');
+                $this->waitBeforeRetry(null, $attempt + 1, 'network error via ' . ($this->maskProxy($proxy) ?? 'direct'));
+
                 continue;
             }
 
             $lastResponse = $response;
 
-            if ($response->successful() || !in_array($response->status(), [429, 500, 502, 503, 504], true)) {
+            $retryableStatus = in_array($response->status(), [429, 500, 502, 503, 504], true)
+                || ($this->proxies !== [] && in_array($response->status(), [401, 403, 407], true));
+            if ($response->successful() || !$retryableStatus) {
                 return $response;
             }
 
-            if ($attempt === $this->maxRetries) {
+            if ($attempt === $attempts - 1) {
                 return $response;
             }
 
-            $this->waitBeforeRetry($response, $attempt + 1, 'HTTP ' . $response->status());
+            $this->waitBeforeRetry(
+                $response,
+                $attempt + 1,
+                'HTTP ' . $response->status() . ' via ' . ($this->maskProxy($proxy) ?? 'direct')
+            );
         }
 
         return $lastResponse;
+    }
+
+    private function resolveProxies(): array
+    {
+        $configured = [];
+        $optionProxies = $this->option('proxy');
+        if (is_array($optionProxies)) {
+            $configured = array_merge($configured, $optionProxies);
+        } elseif (is_string($optionProxies) && trim($optionProxies) !== '') {
+            $configured[] = $optionProxies;
+        }
+        $configured = array_merge($configured, $this->parseProxyList($this->environmentValue('HIREHI_PROXIES')));
+
+        $proxies = [];
+        foreach ($configured as $proxy) {
+            if (!is_string($proxy) || trim($proxy) === '') {
+                continue;
+            }
+            $proxy = trim($proxy);
+            $scheme = parse_url($proxy, PHP_URL_SCHEME);
+            if (!is_string($scheme) || !in_array(strtolower($scheme), ['http', 'https', 'socks5', 'socks5h'], true)) {
+                $this->warn('Skipping unsupported HireHi proxy: ' . $this->maskProxy($proxy));
+
+                continue;
+            }
+            $proxies[$proxy] = $proxy;
+        }
+
+        return array_values($proxies);
+    }
+
+    private function parseProxyList(?string $value): array
+    {
+        if ($value === null || trim($value) === '') {
+            return [];
+        }
+
+        return preg_split('/[\r\n,;]+/', $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    }
+
+    private function environmentValue(string $key): ?string
+    {
+        foreach ([getenv($key), $_ENV[$key] ?? null, $_SERVER[$key] ?? null] as $value) {
+            if (is_string($value) && trim($value) !== '') {
+                return trim($value);
+            }
+        }
+
+        return null;
+    }
+
+    private function nextProxy(): ?string
+    {
+        if ($this->proxies === []) {
+            return null;
+        }
+
+        $proxy = $this->proxies[$this->proxyCursor % count($this->proxies)];
+        $this->proxyCursor++;
+
+        return $proxy;
+    }
+
+    private function maskProxy(?string $proxy): ?string
+    {
+        if ($proxy === null) {
+            return null;
+        }
+        $parts = parse_url($proxy);
+        if (!is_array($parts) || empty($parts['host'])) {
+            return '[proxy hidden]';
+        }
+        $scheme = isset($parts['scheme']) ? strtolower((string) $parts['scheme']) : 'proxy';
+        $auth = isset($parts['user']) ? '***:***@' : '';
+        $port = isset($parts['port']) ? ':' . $parts['port'] : '';
+
+        return "{$scheme}://{$auth}{$parts['host']}{$port}";
     }
 
     private function waitForRequestSlot(): void
@@ -395,6 +514,7 @@ class ParseVacancies extends Command
         try {
             $date = new DateTime($dateStr);
             $date->setTimezone(new \DateTimeZone('Europe/Moscow'));
+
             return $date->format('Y-m-d H:i:s') . ' GMT+3';
         } catch (\Exception $e) {
             return now()->format('Y-m-d H:i:s') . ' GMT+3';
@@ -410,14 +530,14 @@ class ParseVacancies extends Command
         if (empty($salaryStr)) {
             return '';
         }
-        
+
         // Заменяем символы
         $formatted = str_replace(['₽', '~'], ['', ''], $salaryStr);
         $formatted = trim($formatted);
-        
+
         // Заменяем "₽" на "рублей" в конце строки
         $formatted = preg_replace('/\s*$/', ' рублей', $formatted);
-        
+
         return $formatted;
     }
 
@@ -427,16 +547,16 @@ class ParseVacancies extends Command
     private function anonymizeCompany(string $companyName): string
     {
         $companyName = trim($companyName);
-        
+
         // Различные варианты NDA (в любом регистре)
         $ndaVariants = ['nda', 'NDA', 'НДА', 'нда', 'Nda', 'N.D.A.', 'N.D.A'];
-        
+
         foreach ($ndaVariants as $nda) {
             if (strcasecmp($companyName, $nda) === 0) {
                 return 'Анонимный Работодатель';
             }
         }
-        
+
         return $companyName;
     }
 
@@ -446,19 +566,19 @@ class ParseVacancies extends Command
     private function detectEmployment(string $format): string
     {
         $format = mb_strtolower($format);
-        
+
         if (str_contains($format, 'удалённо')) {
             return 'remote';
         }
-        
+
         if (str_contains($format, 'офис')) {
             return 'office';
         }
-        
+
         if (str_contains($format, 'гибрид')) {
             return 'hybrid';
         }
-        
+
         return 'full'; // По умолчанию
     }
 
@@ -469,11 +589,11 @@ class ParseVacancies extends Command
     {
         // Формат: "гибрид Ереван", "офис Москва", "удалённо"
         $parts = explode(' ', $format, 2);
-        
+
         if (count($parts) > 1) {
             return $parts[1]; // Город
         }
-        
+
         return $format === 'удалённо' ? 'Удаленно' : $format;
     }
 
@@ -490,7 +610,7 @@ class ParseVacancies extends Command
             'lead' => 'moreThan6',
             'head' => 'moreThan6',
         ];
-        
+
         return $map[strtolower($level)] ?? 'between1And3';
     }
 
@@ -502,6 +622,7 @@ class ParseVacancies extends Command
         $text = strip_tags($html, '<p><br><ul><ol><li><strong><b><em><i>');
         $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $text = str_replace("\xC2\xA0", ' ', $text);
+
         return preg_replace('/\s+/', ' ', $text);
     }
 
@@ -509,7 +630,7 @@ class ParseVacancies extends Command
     {
         $text = mb_strtolower($text, 'UTF-8');
         $result = '';
-        
+
         for ($i = 0; $i < mb_strlen($text); $i++) {
             $char = mb_substr($text, $i, 1);
             $result .= $this->translitMap[$char] ?? $char;

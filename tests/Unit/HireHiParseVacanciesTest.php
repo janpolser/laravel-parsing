@@ -1,7 +1,9 @@
 <?php
 
 use App\Services\YandexFeedXmlFormat;
+use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
+use Symfony\Component\Console\Input\ArrayInput;
 
 uses(Tests\TestCase::class);
 
@@ -126,3 +128,67 @@ test('hirehi does not generate a feed when filtered counters are empty', functio
     'empty counters' => [[]],
     'zero counters' => [['офис' => 0]],
 ]);
+
+test('hirehi deduplicates jobs by source id before fetching details', function () {
+    Http::fake([
+        'https://hirehi.ru/api/search/jobs*' => Http::sequence()
+            ->push(['filter_counts' => ['format' => ['офис' => 101]]])
+            ->push(['jobs' => [['id' => 42, 'title' => 'Same job', 'company' => 'Test']]])
+            ->push(['jobs' => [['id' => 42, 'title' => 'Same job', 'company' => 'Test']]]),
+        'https://hirehi.ru/api/jobs/42' => Http::response(['description' => 'One description']),
+    ]);
+
+    $this->mock(YandexFeedXmlFormat::class, function ($mock) {
+        $mock->shouldReceive('createXmlFeed')->once()
+            ->withArgs(fn (array $vacancies) => count($vacancies) === 1);
+    });
+
+    $this->artisan('hirehi:parse-vacancies', [
+        '--request-delay-ms' => 250,
+        '--max-retries' => 0,
+    ])->expectsOutput('Пропущено дублей по ID: 1')
+        ->assertSuccessful();
+
+    Http::assertSentCount(4);
+});
+
+test('hirehi does not publish a partial feed when a list page fails', function () {
+    Http::fake([
+        'https://hirehi.ru/api/search/jobs*' => Http::sequence()
+            ->push(['filter_counts' => ['format' => ['офис' => 101]]])
+            ->push(['jobs' => [['id' => 42, 'title' => 'First job', 'company' => 'Test']]])
+            ->push(['error' => 'temporary'], 500),
+    ]);
+
+    $this->mock(YandexFeedXmlFormat::class, function ($mock) {
+        $mock->shouldNotReceive('createXmlFeed');
+    });
+
+    $this->artisan('hirehi:parse-vacancies', [
+        '--request-delay-ms' => 250,
+        '--max-retries' => 0,
+    ])->assertFailed();
+});
+
+test('hirehi accepts unique supported proxy routes and masks credentials', function () {
+    /** @var Command $command */
+    $command = app(\App\Console\Commands\HireHi\ParseVacancies::class);
+    $input = new ArrayInput([
+        '--proxy' => [
+            'http://user:secret@proxy.example:8080',
+            'http://user:secret@proxy.example:8080',
+            'socks5://other.example:1080',
+        ],
+    ]);
+    $input->bind($command->getDefinition());
+    $command->setInput($input);
+
+    $resolve = new ReflectionMethod($command, 'resolveProxies');
+    $mask = new ReflectionMethod($command, 'maskProxy');
+
+    expect($resolve->invoke($command))->toBe([
+        'http://user:secret@proxy.example:8080',
+        'socks5://other.example:1080',
+    ])->and($mask->invoke($command, 'http://user:secret@proxy.example:8080'))
+        ->toBe('http://***:***@proxy.example:8080');
+});

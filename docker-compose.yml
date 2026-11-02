@@ -14,6 +14,7 @@ services:
       APP_DEBUG: ${APP_DEBUG:-true}
       TZ: ${TZ:-Europe/Moscow}
       COMPOSER_CACHE_DIR: /tmp/composer-cache
+      HIREHI_PROXIES: ${HIREHI_PROXIES:-}
     stdin_open: true
     tty: true
     networks:
