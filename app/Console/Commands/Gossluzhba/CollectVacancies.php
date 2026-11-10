@@ -71,6 +71,32 @@ class CollectVacancies extends Command
             return self::FAILURE;
         }
 
+        $lockPath = storage_path('app/gossluzhba/state/collect.lock');
+        $this->ensureDirectory($lockPath);
+        $lock = fopen($lockPath, 'c');
+        if ($lock === false || ! flock($lock, LOCK_EX | LOCK_NB)) {
+            if (is_resource($lock)) {
+                fclose($lock);
+            }
+            $this->error('Gossluzhba уже собирается другим процессом.');
+
+            return self::FAILURE;
+        }
+
+        try {
+            return $this->collect();
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    private function collect(): int
+    {
+        $this->detailRequests = 0;
+        $this->httpRequests = 0;
+        $this->lastRequestError = null;
+
         $pageSize = max(1, (int) $this->option('page-size'));
         $maxPages = max(0, (int) $this->option('max-pages'));
         $detailsLimit = max(0, (int) $this->option('details-limit'));
@@ -82,8 +108,6 @@ class CollectVacancies extends Command
         $this->proxies = $this->resolveProxies();
 
         $this->state = $this->loadState();
-        $this->fileStorageDownloadUrl = $this->fetchFileStorageDownloadUrl()
-            ?? self::DEFAULT_FILE_STORAGE_DOWNLOAD_URL;
 
         $outFileName = (string) $this->option('outfile') . Carbon::now(self::TIMEZONE)->toDateString() . '.xml';
         $outPath = storage_path('app/public/gossluzhba/' . $outFileName);
@@ -94,14 +118,12 @@ class CollectVacancies extends Command
             unlink($tmpPath);
         }
 
-        $writer = $this->openWriter($tmpPath);
+        $writer = null;
         $written = 0;
-        $skipped = 0;
-        $missingDetails = 0;
-        $page = 1;
-        $pageCount = null;
-        $reportedTotal = null;
-        $seenIds = [];
+        $ready = [];
+        $fallback = [];
+        $missing = [];
+        $checkpointCounter = 0;
 
         $this->info(sprintf(
             'Start gossluzhba parser: page_size=%d, details_limit=%d, request_delay=%d-%dms, proxies=%d, allow_summary_fallback=%s',
@@ -114,135 +136,99 @@ class CollectVacancies extends Command
         ));
 
         try {
-            while (true) {
-                if ($maxPages > 0 && $page > $maxPages) {
-                    throw new \RuntimeException("Reached max-pages={$maxPages}; incomplete feed will not be published");
-                }
+            $this->fileStorageDownloadUrl = $this->fetchFileStorageDownloadUrl()
+                ?? self::DEFAULT_FILE_STORAGE_DOWNLOAD_URL;
+            $snapshot = $this->collectStableSnapshot($pageSize, $maxPages, $filters);
+            $this->saveListSnapshot($snapshot, $filters);
 
-                $list = $this->fetchListPage($page, $pageSize, $filters);
-                if ($list === null) {
-                    $reason = $this->lastRequestError ? ': '.$this->lastRequestError : '';
-
-                    throw new \RuntimeException("Cannot fetch list page {$page}{$reason}");
-                }
-
-                $vacancies = $list['vacancies'] ?? null;
-                if (!is_array($vacancies) || !isset($list['pageCount'], $list['total']) || !is_numeric($list['pageCount']) || !is_numeric($list['total'])) {
-                    throw new \RuntimeException("Invalid vacancies payload on page {$page}");
-                }
-
-                $pageCount = (int) $list['pageCount'];
-                $total = (int) $list['total'];
-
-                if ($reportedTotal !== null && $reportedTotal !== $total) {
-                    throw new \RuntimeException("Vacancy total changed during collection: {$reportedTotal} to {$total}");
-                }
-                $reportedTotal = $total;
-
-                if ($pageCount < 1 || (empty($vacancies) && $total > 0)) {
-                    throw new \RuntimeException("Incomplete vacancies payload on page {$page}/{$pageCount}");
-                }
-
-                $this->line(sprintf(
-                    'Page %d/%d: %d vacancies, total=%d',
-                    $page,
-                    $pageCount,
-                    count($vacancies),
-                    $total
-                ));
-
-                foreach ($vacancies as $summary) {
-                    if (!is_array($summary)) {
-                        $skipped++;
-                        continue;
-                    }
-
-                    $id = $this->normalizeId($summary['id'] ?? null);
-                    if ($id === null) {
-                        $skipped++;
-                        continue;
-                    }
-                    if (isset($seenIds[$id])) {
-                        continue;
-                    }
-                    $seenIds[$id] = true;
-
+            for ($round = 0; $round <= 2; $round++) {
+                $processed = 0;
+                foreach ($snapshot as $id => $summary) {
+                    $id = (string) $id;
                     $summaryHash = $this->summaryHash($summary);
-                    $detail = $this->resolveDetail(
-                        $id,
-                        $summaryHash,
-                        $detailsLimit,
-                        $refreshDays
-                    );
-
-                    if (empty($detail) && !$allowSummaryFallback) {
-                        $missingDetails++;
-                        $skipped++;
-                        Log::warning('Skipping gossluzhba vacancy without detail payload', [
-                            'id' => $id,
-                            'summary_hash' => $summaryHash,
-                        ]);
-
+                    if (($ready[$id] ?? null) === $summaryHash) {
+                        $processed++;
                         continue;
                     }
 
+                    $this->lastRequestError = null;
+                    $detail = $this->resolveDetail($id, $summaryHash, $detailsLimit, $refreshDays);
+                    if ($detail === [] && ! $allowSummaryFallback) {
+                        if (str_starts_with($this->lastRequestError ?? '', 'HTTP 404:')
+                            || str_starts_with($this->lastRequestError ?? '', 'HTTP 410:')) {
+                            $missing[$id] = true;
+                            $this->warn("Vacancy {$id} is unavailable; checking the final list.");
+                            continue;
+                        }
+                        throw new \RuntimeException("Missing vacancy detail {$id}; previous feed is preserved");
+                    }
+                    unset($missing[$id]);
                     $entity = $this->mapToEntity($summary, $detail);
-                    if (!$this->isValidEntity($entity)) {
-                        $skipped++;
-                        Log::warning('Skipping invalid gossluzhba vacancy', [
-                            'id' => $id,
-                            'url' => $entity['url'] ?? null,
-                            'job_name' => $entity['job_name'] ?? null,
-                        ]);
-
-                        continue;
+                    if (! $this->isValidEntity($entity)) {
+                        throw new \RuntimeException("Invalid vacancy {$id}; previous feed is preserved");
                     }
 
-                    $this->writeVacancyXml($writer, $entity);
-                    $written++;
-
+                    $fallback[$id] = $detail === [];
+                    $ready[$id] = $summaryHash;
                     $this->state[$id] = array_merge($this->state[$id] ?? [], [
-                        'summary_hash' => $summaryHash,
                         'last_seen_at' => Carbon::now(self::TIMEZONE)->toIso8601String(),
                     ]);
-
-                    if ($written % 100 === 0) {
-                        $writer->flush();
-                        $this->line(sprintf(
-                            'Written %d vacancies, detail_requests=%d',
-                            $written,
-                            $this->detailRequests
-                        ));
+                    $processed++;
+                    if (++$checkpointCounter % 25 === 0) {
+                        $this->writeState($this->state);
+                    }
+                    if ($processed % 100 === 0) {
+                        $this->line(sprintf('Prepared %d/%d vacancies, detail_requests=%d', $processed, count($snapshot), $this->detailRequests));
                     }
                 }
+                $this->writeState($this->state);
 
-                if ($page >= $pageCount) {
+                $latest = $this->collectStableSnapshot($pageSize, $maxPages, $filters);
+                $this->saveListSnapshot($latest, $filters);
+                if ($this->snapshotFingerprint($snapshot) === $this->snapshotFingerprint($latest)) {
+                    if (array_intersect_key($missing, $latest) !== []) {
+                        throw new \RuntimeException('Some listed vacancies have unavailable details; previous feed is preserved');
+                    }
+                    $snapshot = $latest;
                     break;
                 }
-
-                $page++;
+                if ($round === 2) {
+                    throw new \RuntimeException('Vacancy catalogue kept changing after bounded reconciliation; previous feed is preserved');
+                }
+                $this->warn('Vacancy catalogue changed; reconciling updated and new entries.');
+                $snapshot = $latest;
             }
 
-            if ($written === 0 || $skipped > 0 || count($seenIds) !== $reportedTotal) {
-                throw new \RuntimeException("Incomplete feed: reported={$reportedTotal}, unique=".count($seenIds).", written={$written}, skipped={$skipped}, missing_details={$missingDetails}");
+            $writer = $this->openWriter($tmpPath);
+            foreach ($snapshot as $id => $summary) {
+                $id = (string) $id;
+                $detail = ! empty($fallback[$id]) ? [] : $this->loadDetailCache($id);
+                if ($detail === [] && empty($fallback[$id])) {
+                    throw new \RuntimeException("Missing cached detail {$id}; previous feed is preserved");
+                }
+                $entity = $this->mapToEntity($summary, $detail);
+                if (! $this->isValidEntity($entity)) {
+                    throw new \RuntimeException("Invalid vacancy {$id}; previous feed is preserved");
+                }
+                $this->writeVacancyXml($writer, $entity);
+                $written++;
             }
-
             $this->closeWriter($writer);
             $this->publishTmpFile($tmpPath, $outPath);
             $this->writeState($this->state);
 
             $this->info(sprintf(
-                'XML generated: %s, vacancies=%d, skipped=%d, missing_details=%d, detail_requests=%d',
+                'XML generated: %s, vacancies=%d, detail_requests=%d',
                 $outPath,
                 $written,
-                $skipped,
-                $missingDetails,
                 $this->detailRequests
             ));
 
             return self::SUCCESS;
         } catch (GossluzhbaProtectionException $e) {
-            $writer->flush();
+            if ($writer instanceof XMLWriter) {
+                $writer->flush();
+            }
             if (is_file($tmpPath)) {
                 unlink($tmpPath);
             }
@@ -251,7 +237,9 @@ class CollectVacancies extends Command
 
             return self::FAILURE;
         } catch (\Throwable $e) {
-            $writer->flush();
+            if ($writer instanceof XMLWriter) {
+                $writer->flush();
+            }
             if (is_file($tmpPath)) {
                 unlink($tmpPath);
             }
@@ -261,6 +249,105 @@ class CollectVacancies extends Command
 
             return self::FAILURE;
         }
+    }
+
+    /** @return array<string, array> */
+    private function collectStableSnapshot(int $pageSize, int $maxPages, array $filters): array
+    {
+        $previous = null;
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            $scan = $this->scanList($pageSize, $maxPages, $filters);
+            if ($scan['consistent'] && $previous !== null
+                && $this->snapshotFingerprint($previous) === $this->snapshotFingerprint($scan['items'])) {
+                $this->info('Stable list snapshot: '.count($scan['items']).' vacancies');
+
+                return $scan['items'];
+            }
+            $previous = $scan['consistent'] ? $scan['items'] : null;
+            $this->warn("List scan {$attempt} requires confirmation.");
+        }
+
+        throw new \RuntimeException('Could not obtain a stable vacancy list after three scans; previous feed is preserved');
+    }
+
+    private function scanList(int $pageSize, int $maxPages, array $filters): array
+    {
+        $page = 1;
+        $reportedTotal = null;
+        $reportedPages = null;
+        $consistent = true;
+        $items = [];
+
+        while (true) {
+            if ($maxPages > 0 && $page > $maxPages) {
+                throw new \RuntimeException("Reached max-pages={$maxPages}; incomplete feed will not be published");
+            }
+
+            $list = $this->fetchListPage($page, $pageSize, $filters);
+            if ($list === null) {
+                $reason = $this->lastRequestError ? ': '.$this->lastRequestError : '';
+                throw new \RuntimeException("Cannot fetch list page {$page}{$reason}");
+            }
+            $vacancies = $list['vacancies'] ?? null;
+            if (! is_array($vacancies) || ! isset($list['pageCount'], $list['total'])
+                || ! is_numeric($list['pageCount']) || ! is_numeric($list['total'])) {
+                throw new \RuntimeException("Invalid vacancies payload on page {$page}");
+            }
+
+            $pageCount = (int) $list['pageCount'];
+            $total = (int) $list['total'];
+            if ($pageCount < 1 || $total < 1 || $vacancies === []) {
+                throw new \RuntimeException("Incomplete vacancies payload on page {$page}/{$pageCount}");
+            }
+            if (($reportedTotal !== null && $reportedTotal !== $total)
+                || ($reportedPages !== null && $reportedPages !== $pageCount)) {
+                $consistent = false;
+            }
+            $reportedTotal = $total;
+            $reportedPages = $pageCount;
+            $this->line("List page {$page}/{$pageCount}: ".count($vacancies)." vacancies, total={$total}");
+
+            foreach ($vacancies as $summary) {
+                $id = is_array($summary) ? $this->normalizeId($summary['id'] ?? null) : null;
+                if ($id === null) {
+                    throw new \RuntimeException("Invalid vacancy ID on page {$page}");
+                }
+                if (isset($items[$id])) {
+                    $consistent = false;
+                }
+                $items[$id] = $summary;
+            }
+
+            if ($page >= $pageCount) {
+                break;
+            }
+            $page++;
+        }
+
+        ksort($items, SORT_STRING);
+
+        return ['items' => $items, 'consistent' => $consistent && count($items) === $reportedTotal];
+    }
+
+    private function snapshotFingerprint(array $items): string
+    {
+        $hashes = [];
+        foreach ($items as $id => $summary) {
+            $hashes[(string) $id] = $this->summaryHash($summary);
+        }
+        ksort($hashes, SORT_STRING);
+
+        return hash('sha256', json_encode($hashes, JSON_THROW_ON_ERROR));
+    }
+
+    private function saveListSnapshot(array $items, array $filters): void
+    {
+        $this->writeJsonFile(storage_path('app/gossluzhba/state/list-snapshot.json'), [
+            'captured_at' => Carbon::now(self::TIMEZONE)->toIso8601String(),
+            'filters' => $filters,
+            'count' => count($items),
+            'vacancies' => $items,
+        ]);
     }
 
     private function fetchListPage(int $page, int $pageSize, array $filters): ?array
@@ -305,7 +392,7 @@ class CollectVacancies extends Command
         }
 
         if ($detailsLimit > 0 && $this->detailRequests >= $detailsLimit) {
-            return $cached;
+            return [];
         }
 
         $detail = $this->fetchDetail($id);
@@ -319,7 +406,7 @@ class CollectVacancies extends Command
             return $detail;
         }
 
-        return $cached;
+        return [];
     }
 
     private function fetchDetail(string $id): array
@@ -1034,9 +1121,16 @@ class CollectVacancies extends Command
     private function writeJsonFile(string $path, array $payload): void
     {
         $this->ensureDirectory($path);
-        $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-        if ($json !== false) {
-            file_put_contents($path, $json);
+        $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR);
+        $tmpPath = $path.'.'.bin2hex(random_bytes(8)).'.tmp';
+        try {
+            if (file_put_contents($tmpPath, $json, LOCK_EX) !== strlen($json) || ! rename($tmpPath, $path)) {
+                throw new \RuntimeException("Cannot persist JSON state: {$path}");
+            }
+        } finally {
+            if (is_file($tmpPath)) {
+                unlink($tmpPath);
+            }
         }
     }
 

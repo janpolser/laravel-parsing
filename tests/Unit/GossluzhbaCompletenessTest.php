@@ -44,6 +44,15 @@ test('a protection response is not retried', function () {
     Http::assertSentCount(2);
 });
 
+test('a protection response from configuration stops before listing requests', function () {
+    Http::fake(fn () => Http::response([], 403));
+
+    $this->artisan('gossluzhba:collect-vacancies')->assertFailed();
+    Http::assertSentCount(1);
+    expect(File::exists(storage_path('app/private/gossluzhba.disabled')))->toBeTrue()
+        ->and(File::get($this->output))->toBe('<previous/>');
+});
+
 test('a feed without vacancies does not replace the previous feed', function () {
     Http::fake(fn (Request $request) => str_contains($request->url(), 'private-get')
         ? Http::response([])
@@ -96,5 +105,226 @@ test('a complete multi-page feed contains every vacancy', function () {
     ])->assertSuccessful();
 
     expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(2);
-    Http::assertSentCount(5);
+    Http::assertSentCount(11);
+});
+
+test('a changed total during initial listing is reconciled before any detail request', function () {
+    $listCalls = 0;
+    $requests = [];
+    Http::fake(function (Request $request) use (&$listCalls, &$requests) {
+        $path = parse_url($request->url(), PHP_URL_PATH);
+        $requests[] = $path;
+        if (str_contains($path, 'private-get')) {
+            return Http::response([]);
+        }
+        if (str_contains($path, 'get-vacancies')) {
+            $listCalls++;
+            $items = [['id' => '1', 'caption' => 'Один', 'organizationName' => 'Организация']];
+            if ($listCalls > 1) {
+                $items[] = ['id' => '2', 'caption' => 'Два', 'organizationName' => 'Организация'];
+            }
+
+            return Http::response(['vacancies' => $items, 'pageCount' => 1, 'total' => count($items)]);
+        }
+
+        return Http::response(['vacancy' => ['caption' => 'Специалист', 'organizationName' => 'Организация']]);
+    });
+
+    $this->artisan('gossluzhba:collect-vacancies', [
+        '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
+    ])->assertSuccessful();
+
+    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(2)
+        ->and($listCalls)->toBe(5)
+        ->and($requests[1])->toContain('get-vacancies')
+        ->and($requests[2])->toContain('get-vacancies')
+        ->and($requests[3])->toContain('get-vacancies')
+        ->and($requests[4])->not->toContain('get-vacancies')
+        ->and(json_decode(File::get(storage_path('app/gossluzhba/state/list-snapshot.json')), true)['count'])->toBe(2);
+});
+
+test('a total changing between pages is rechecked before detail collection', function () {
+    $listCalls = 0;
+    $detailListCounts = [];
+    Http::fake(function (Request $request) use (&$listCalls, &$detailListCounts) {
+        $path = parse_url($request->url(), PHP_URL_PATH);
+        if (str_contains($path, 'private-get')) {
+            return Http::response([]);
+        }
+        if (str_contains($path, 'get-vacancies')) {
+            $listCalls++;
+            $page = (int) $request['page'];
+            $items = $page === 1
+                ? [['id' => '1', 'caption' => 'Один', 'organizationName' => 'Организация'], ['id' => '2', 'caption' => 'Два', 'organizationName' => 'Организация']]
+                : [['id' => '3', 'caption' => 'Три', 'organizationName' => 'Организация']];
+
+            return Http::response(['vacancies' => $items, 'pageCount' => 2, 'total' => $listCalls === 1 ? 2 : 3]);
+        }
+        $detailListCounts[] = $listCalls;
+
+        return Http::response(['vacancy' => ['caption' => 'Специалист', 'organizationName' => 'Организация']]);
+    });
+
+    $this->artisan('gossluzhba:collect-vacancies', [
+        '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
+    ])->assertSuccessful();
+
+    expect($detailListCounts)->toBe([6, 6, 6])
+        ->and(substr_count(File::get($this->output), '<vacancy>'))->toBe(3);
+});
+
+test('a vacancy added while collecting details is reconciled before publication', function () {
+    $detailCalls = [];
+    Http::fake(function (Request $request) use (&$detailCalls) {
+        $path = parse_url($request->url(), PHP_URL_PATH);
+        if (str_contains($path, 'private-get')) {
+            return Http::response([]);
+        }
+        if (str_contains($path, 'get-vacancies')) {
+            $items = [['id' => '1', 'caption' => 'Один', 'organizationName' => 'Организация']];
+            if ($detailCalls !== []) {
+                $items[] = ['id' => '2', 'caption' => 'Два', 'organizationName' => 'Организация'];
+            }
+
+            return Http::response(['vacancies' => $items, 'pageCount' => 1, 'total' => count($items)]);
+        }
+        $detailCalls[] = basename($path);
+
+        return Http::response(['vacancy' => ['caption' => 'Специалист', 'organizationName' => 'Организация']]);
+    });
+
+    $this->artisan('gossluzhba:collect-vacancies', [
+        '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
+    ])->assertSuccessful();
+
+    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(2)
+        ->and($detailCalls)->toBe(['1', '2']);
+});
+
+test('a disappeared vacancy with 404 is excluded only after list reconciliation', function () {
+    $missingSeen = false;
+    Http::fake(function (Request $request) use (&$missingSeen) {
+        $path = parse_url($request->url(), PHP_URL_PATH);
+        if (str_contains($path, 'private-get')) {
+            return Http::response([]);
+        }
+        if (str_contains($path, 'get-vacancies')) {
+            $items = [['id' => '2', 'caption' => 'Два', 'organizationName' => 'Организация']];
+            if (! $missingSeen) {
+                array_unshift($items, ['id' => '1', 'caption' => 'Один', 'organizationName' => 'Организация']);
+            }
+
+            return Http::response(['vacancies' => $items, 'pageCount' => 1, 'total' => count($items)]);
+        }
+        if (basename($path) === '1') {
+            $missingSeen = true;
+
+            return Http::response([], 404);
+        }
+
+        return Http::response(['vacancy' => ['caption' => 'Специалист', 'organizationName' => 'Организация']]);
+    });
+
+    $this->artisan('gossluzhba:collect-vacancies', [
+        '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
+    ])->assertSuccessful();
+
+    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(1)
+        ->and(File::get($this->output))->toContain('/vacancy/2');
+});
+
+test('a continually changing list preserves the previous feed', function () {
+    $listCalls = 0;
+    Http::fake(function (Request $request) use (&$listCalls) {
+        $path = parse_url($request->url(), PHP_URL_PATH);
+        if (str_contains($path, 'private-get')) {
+            return Http::response([]);
+        }
+        if (str_contains($path, 'get-vacancies')) {
+            $listCalls++;
+            $id = $listCalls <= 2 ? '1' : (string) $listCalls;
+
+            return Http::response(['vacancies' => [['id' => $id, 'caption' => 'Специалист', 'organizationName' => 'Организация']], 'pageCount' => 1, 'total' => 1]);
+        }
+
+        return Http::response(['vacancy' => ['caption' => 'Специалист', 'organizationName' => 'Организация']]);
+    });
+
+    $this->artisan('gossluzhba:collect-vacancies', [
+        '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
+    ])->assertFailed();
+
+    expect(File::get($this->output))->toBe('<previous/>')->and($listCalls)->toBe(5);
+});
+
+test('repeated duplicate pages never publish a partial snapshot', function () {
+    Http::fake(fn (Request $request) => str_contains($request->url(), 'private-get')
+        ? Http::response([])
+        : Http::response([
+            'vacancies' => [['id' => '1', 'caption' => 'Один', 'organizationName' => 'Организация']],
+            'pageCount' => 2,
+            'total' => 2,
+        ]));
+
+    $this->artisan('gossluzhba:collect-vacancies', [
+        '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
+    ])->assertFailed();
+
+    expect(File::get($this->output))->toBe('<previous/>');
+    Http::assertSentCount(7);
+});
+
+test('a second collector cannot start while the source is locked', function () {
+    $path = storage_path('app/gossluzhba/state/collect.lock');
+    File::ensureDirectoryExists(dirname($path));
+    $lock = fopen($path, 'c');
+    flock($lock, LOCK_EX);
+    Http::fake();
+
+    try {
+        $this->artisan('gossluzhba:collect-vacancies')->assertFailed();
+        Http::assertNothingSent();
+        expect(File::get($this->output))->toBe('<previous/>');
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+});
+
+test('a failed run preserves progress and does not refetch a cached successful detail', function () {
+    $failSecond = true;
+    $detailCalls = [];
+    Http::fake(function (Request $request) use (&$failSecond, &$detailCalls) {
+        $path = parse_url($request->url(), PHP_URL_PATH);
+        if (str_contains($path, 'private-get')) {
+            return Http::response([]);
+        }
+        if (str_contains($path, 'get-vacancies')) {
+            return Http::response([
+                'vacancies' => [
+                    ['id' => '1', 'caption' => 'Один', 'organizationName' => 'Организация'],
+                    ['id' => '2', 'caption' => 'Два', 'organizationName' => 'Организация'],
+                ],
+                'pageCount' => 1,
+                'total' => 2,
+            ]);
+        }
+        $id = basename($path);
+        $detailCalls[] = $id;
+        if ($id === '2' && $failSecond) {
+            return Http::response([], 404);
+        }
+
+        return Http::response(['vacancy' => ['caption' => 'Специалист', 'organizationName' => 'Организация']]);
+    });
+    $options = ['--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000];
+
+    $this->artisan('gossluzhba:collect-vacancies', $options)->assertFailed();
+    expect(File::get($this->output))->toBe('<previous/>')
+        ->and(File::exists(storage_path('app/gossluzhba/cache/details/1.json')))->toBeTrue();
+    $failSecond = false;
+    $this->artisan('gossluzhba:collect-vacancies', $options)->assertSuccessful();
+
+    expect($detailCalls)->toBe(['1', '2', '2'])
+        ->and(substr_count(File::get($this->output), '<vacancy>'))->toBe(2);
 });
