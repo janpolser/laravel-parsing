@@ -18,13 +18,22 @@ class TarXmlFiles extends Command
         ini_set('memory_limit', '4G');
         $sources = [
             '5ka' => 'storage/app/public/5ka',
+            'perekrestok' => 'storage/app/public/perekrestok',
+            'krasnoeibeloe' => 'storage/app/public/krasnoeibeloe',
             'hirehi' => 'storage/app/public/hirehi',
             'kuper' => 'storage/app/public/kuper',
             'magnit' => 'storage/app/public/magnit',
             'rzhd' => 'storage/app/public/rzhd',
             'wb' => 'storage/app/public/wb',
+            'ozon' => 'storage/app/public/ozon',
+            'lenta' => 'storage/app/public/lenta',
             'yandex' => 'storage/app/public/yandex',
             'gossluzhba' => 'storage/app/public/gossluzhba',
+            'monetka' => 'storage/app/public/monetka',
+            'monetka-pekarni' => 'storage/app/public/monetka-pekarni',
+            'vkusvill' => 'storage/app/public/vkusvill',
+            'vkusvill-all' => 'storage/app/public/vkusvill-all',
+            'dixy' => 'storage/app/public/dixy',
         ];
 
         $source = $this->argument('source');

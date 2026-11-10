@@ -14,7 +14,7 @@ class YandexFeedXmlFormat
         'url', 'creation_date', 'job_name', 'description', 'company_name',
     ];
 
-    public function createXmlFeed(array $entities, string $hostName, string $filePath): void
+    public function createXmlFeed(iterable $entities, string $hostName, string $filePath): void
     {
         date_default_timezone_set('Europe/Moscow');
         $this->ensureDirectory($filePath);
@@ -24,7 +24,7 @@ class YandexFeedXmlFormat
             unlink($tmpPath);
         }
 
-        $writer = new XMLWriter();
+        $writer = new XMLWriter;
         if (!$writer->openURI($tmpPath)) {
             throw new Exception("Cannot open XML file for writing: {$tmpPath}");
         }

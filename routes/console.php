@@ -28,6 +28,31 @@ Schedule::command('pyaterochka:vacancy-5ka')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
+// Перекрёсток
+Schedule::command('perekrestok:collect-vacancies')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'perekrestok']);
+        if ($exitCode !== 0) {
+            Log::error('Perekrestok feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->withoutOverlapping();
+
+// Красное&Белое
+Schedule::command('krasnoeibeloe:collect-vacancies')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'krasnoeibeloe']);
+        if ($exitCode !== 0) {
+            Log::error('Krasnoe&Beloe feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->runInBackground()
+    ->withoutOverlapping();
+
 // РЖД
 Schedule::command('rzhd:collect-vacancies')
     ->cron('0 7 * * 0')
@@ -38,6 +63,88 @@ Schedule::command('rzhd:collect-vacancies')
 Schedule::command('wb:collect-wb-vacancies')
     ->cron('0 7 * * 0')
     ->appendOutputTo('/proc/1/fd/1')
+    ->withoutOverlapping();
+
+// Ozon
+Schedule::command('ozon:collect-vacancies')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'ozon']);
+        if ($exitCode !== 0) {
+            Log::error('Ozon feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->withoutOverlapping();
+
+// Лента
+Schedule::command('lenta:collect-vacancies')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'lenta']);
+        if ($exitCode !== 0) {
+            Log::error('Lenta feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->withoutOverlapping();
+
+// Монетка
+Schedule::command('monetka:collect-vacancies')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'monetka']);
+        if ($exitCode !== 0) {
+            Log::error('Monetka feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->withoutOverlapping();
+
+// ДИКСИ
+Schedule::command('dixy:collect-vacancies')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'dixy']);
+        if ($exitCode !== 0) {
+            Log::error('Dixy feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->withoutOverlapping();
+
+Schedule::command('monetka:collect-vacancies --section=pekarni')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'monetka-pekarni']);
+        if ($exitCode !== 0) {
+            Log::error('Monetka bakery feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->withoutOverlapping();
+
+// ВкусВилл
+Schedule::command('vkusvill:collect-vacancies')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'vkusvill']);
+        if ($exitCode !== 0) {
+            Log::error('VkusVill feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
+    ->withoutOverlapping();
+
+Schedule::command('vkusvill:collect-vacancies --section=all')
+    ->cron('0 7 * * 0')
+    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'vkusvill-all']);
+        if ($exitCode !== 0) {
+            Log::error('VkusVill all-jobs feed archive generation failed', ['output' => Artisan::output()]);
+        }
+    })
     ->withoutOverlapping();
 
 Schedule::command('wb:generate-courier-vacancies')
@@ -93,7 +200,7 @@ Schedule::command('xml:tar gossluzhba')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
-Schedule::command('xml:tar --exclude=hirehi --exclude=gossluzhba')
+Schedule::command('xml:tar --exclude=hirehi --exclude=ozon --exclude=perekrestok --exclude=krasnoeibeloe --exclude=gossluzhba')
     ->cron('0 7 * * 0')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();

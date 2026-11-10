@@ -15,6 +15,7 @@ services:
       TZ: ${TZ:-Europe/Moscow}
       COMPOSER_CACHE_DIR: /tmp/composer-cache
       HIREHI_PROXIES: ${HIREHI_PROXIES:-}
+      GOSSLUZHBA_EXTERNAL_RUNNER: ${GOSSLUZHBA_EXTERNAL_RUNNER:-false}
     stdin_open: true
     tty: true
     networks:

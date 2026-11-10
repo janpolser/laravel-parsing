@@ -35,4 +35,8 @@ return [
         ],
     ],
 
+    'hh' => [
+        'api_token' => env('HH_API_TOKEN'),
+    ],
+
 ];
