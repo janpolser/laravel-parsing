@@ -1,1 +1,1 @@
-0 7 * * 0 cd /var/www && php artisan gossluzhba:collect-vacancies --details-limit=0 --sleep-ms=1500 --refresh-days=30 --without-tls-verify && php artisan xml:tar gossluzhba
+0 7 * * 0 cd /var/www && php artisan gossluzhba:collect-vacancies --details-limit=0 --refresh-days=30 --without-tls-verify && php artisan xml:tar gossluzhba

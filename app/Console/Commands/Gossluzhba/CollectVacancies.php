@@ -6,6 +6,7 @@ use App\Support\VacancyTextUrls;
 use Illuminate\Console\Command;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use XMLWriter;
@@ -31,8 +32,10 @@ class CollectVacancies extends Command
         {--page-size=1000 : List API page size}
         {--max-pages=0 : Max list pages to fetch, 0 means all pages}
         {--details-limit=0 : Max detail API requests per run, 0 means no limit}
-        {--sleep-ms=1500 : Delay between detail requests, ms}
-        {--list-sleep-ms=500 : Delay between list page requests, ms}
+        {--sleep-ms=1500 : Deprecated; all requests use the randomized delay}
+        {--list-sleep-ms=500 : Deprecated; all requests use the randomized delay}
+        {--request-delay-min-ms=2000 : Minimum delay between HTTP requests, ms}
+        {--request-delay-max-ms=4000 : Maximum randomized delay between HTTP requests, ms}
         {--refresh-days=30 : Refresh cached details after N days}
         {--region= : Optional okatoregion UUID filter}
         {--area= : Optional okatoarea UUID filter}
@@ -43,6 +46,12 @@ class CollectVacancies extends Command
     protected $description = 'Collects gossluzhba.gov.ru vacancies and writes Yandex-compatible XML in a streaming mode.';
 
     private int $detailRequests = 0;
+
+    private int $httpRequests = 0;
+
+    private int $requestDelayMinMs = 2000;
+
+    private int $requestDelayMaxMs = 4000;
 
     private array $state = [];
 
@@ -56,11 +65,17 @@ class CollectVacancies extends Command
 
     public function handle(): int
     {
+        if (is_file(storage_path('app/private/gossluzhba.disabled'))) {
+            $this->error('Gossluzhba остановлена после защитного ответа. Запросы не выполняются.');
+
+            return self::FAILURE;
+        }
+
         $pageSize = max(1, (int) $this->option('page-size'));
         $maxPages = max(0, (int) $this->option('max-pages'));
         $detailsLimit = max(0, (int) $this->option('details-limit'));
-        $sleepMs = max(0, (int) $this->option('sleep-ms'));
-        $listSleepMs = max(0, (int) $this->option('list-sleep-ms'));
+        $this->requestDelayMinMs = max(2000, (int) $this->option('request-delay-min-ms'));
+        $this->requestDelayMaxMs = max($this->requestDelayMinMs, (int) $this->option('request-delay-max-ms'));
         $refreshDays = max(1, (int) $this->option('refresh-days'));
         $allowSummaryFallback = (bool) $this->option('allow-summary-fallback');
         $filters = $this->requestFilters();
@@ -85,13 +100,15 @@ class CollectVacancies extends Command
         $missingDetails = 0;
         $page = 1;
         $pageCount = null;
+        $reportedTotal = null;
         $seenIds = [];
 
         $this->info(sprintf(
-            'Start gossluzhba parser: page_size=%d, details_limit=%d, detail_delay=%dms, proxies=%d, allow_summary_fallback=%s',
+            'Start gossluzhba parser: page_size=%d, details_limit=%d, request_delay=%d-%dms, proxies=%d, allow_summary_fallback=%s',
             $pageSize,
             $detailsLimit,
-            $sleepMs,
+            $this->requestDelayMinMs,
+            $this->requestDelayMaxMs,
             count($this->proxies),
             $allowSummaryFallback ? 'yes' : 'no'
         ));
@@ -99,8 +116,7 @@ class CollectVacancies extends Command
         try {
             while (true) {
                 if ($maxPages > 0 && $page > $maxPages) {
-                    $this->warn("Reached max-pages={$maxPages}");
-                    break;
+                    throw new \RuntimeException("Reached max-pages={$maxPages}; incomplete feed will not be published");
                 }
 
                 $list = $this->fetchListPage($page, $pageSize, $filters);
@@ -110,13 +126,22 @@ class CollectVacancies extends Command
                     throw new \RuntimeException("Cannot fetch list page {$page}{$reason}");
                 }
 
-                $vacancies = $list['vacancies'] ?? [];
-                if (!is_array($vacancies)) {
+                $vacancies = $list['vacancies'] ?? null;
+                if (!is_array($vacancies) || !isset($list['pageCount'], $list['total']) || !is_numeric($list['pageCount']) || !is_numeric($list['total'])) {
                     throw new \RuntimeException("Invalid vacancies payload on page {$page}");
                 }
 
-                $pageCount = (int) ($list['pageCount'] ?? $pageCount ?? 1);
-                $total = (int) ($list['total'] ?? 0);
+                $pageCount = (int) $list['pageCount'];
+                $total = (int) $list['total'];
+
+                if ($reportedTotal !== null && $reportedTotal !== $total) {
+                    throw new \RuntimeException("Vacancy total changed during collection: {$reportedTotal} to {$total}");
+                }
+                $reportedTotal = $total;
+
+                if ($pageCount < 1 || (empty($vacancies) && $total > 0)) {
+                    throw new \RuntimeException("Incomplete vacancies payload on page {$page}/{$pageCount}");
+                }
 
                 $this->line(sprintf(
                     'Page %d/%d: %d vacancies, total=%d',
@@ -128,11 +153,16 @@ class CollectVacancies extends Command
 
                 foreach ($vacancies as $summary) {
                     if (!is_array($summary)) {
+                        $skipped++;
                         continue;
                     }
 
                     $id = $this->normalizeId($summary['id'] ?? null);
-                    if ($id === null || isset($seenIds[$id])) {
+                    if ($id === null) {
+                        $skipped++;
+                        continue;
+                    }
+                    if (isset($seenIds[$id])) {
                         continue;
                     }
                     $seenIds[$id] = true;
@@ -142,7 +172,6 @@ class CollectVacancies extends Command
                         $id,
                         $summaryHash,
                         $detailsLimit,
-                        $sleepMs,
                         $refreshDays
                     );
 
@@ -187,14 +216,15 @@ class CollectVacancies extends Command
                     }
                 }
 
-                if ($page >= $pageCount || empty($vacancies)) {
+                if ($page >= $pageCount) {
                     break;
                 }
 
                 $page++;
-                if ($listSleepMs > 0) {
-                    usleep($listSleepMs * 1000);
-                }
+            }
+
+            if ($written === 0 || $skipped > 0 || count($seenIds) !== $reportedTotal) {
+                throw new \RuntimeException("Incomplete feed: reported={$reportedTotal}, unique=".count($seenIds).", written={$written}, skipped={$skipped}, missing_details={$missingDetails}");
             }
 
             $this->closeWriter($writer);
@@ -259,7 +289,6 @@ class CollectVacancies extends Command
         string $id,
         string $summaryHash,
         int $detailsLimit,
-        int $sleepMs,
         int $refreshDays
     ): array {
         $cached = $this->loadDetailCache($id);
@@ -277,10 +306,6 @@ class CollectVacancies extends Command
 
         if ($detailsLimit > 0 && $this->detailRequests >= $detailsLimit) {
             return $cached;
-        }
-
-        if ($sleepMs > 0 && $this->detailRequests > 0) {
-            usleep($sleepMs * 1000);
         }
 
         $detail = $this->fetchDetail($id);
@@ -341,6 +366,11 @@ class CollectVacancies extends Command
         for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
             $proxy = $this->nextProxy();
 
+            if ($this->httpRequests > 0) {
+                usleep(random_int($this->requestDelayMinMs, $this->requestDelayMaxMs) * 1000);
+            }
+            $this->httpRequests++;
+
             try {
                 $request = Http::timeout(35)
                     ->connectTimeout(15)
@@ -391,12 +421,9 @@ class CollectVacancies extends Command
             ]);
 
             if ($status === 403 || $status === 429) {
-                if ($this->proxies !== [] && $attempt < $maxRetries) {
-                    $this->sleepBackoff($attempt);
-
-                    continue;
-                }
-
+                $marker = storage_path('app/private/gossluzhba.disabled');
+                File::ensureDirectoryExists(dirname($marker));
+                File::put($marker, now(self::TIMEZONE)->toIso8601String()." HTTP {$status}\n");
                 throw new GossluzhbaProtectionException("HTTP {$status} for {$url}");
             }
 
