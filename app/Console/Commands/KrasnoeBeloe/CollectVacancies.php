@@ -7,7 +7,6 @@ use App\Support\VacancyTextUrls;
 use DOMDocument;
 use DOMXPath;
 use Illuminate\Console\Command;
-use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\File;
@@ -18,7 +17,7 @@ class CollectVacancies extends Command
 {
     protected $signature = 'krasnoeibeloe:collect-vacancies
         {--max-cities=0 : Максимум городов для preview, 0 — вся страна}
-        {--batch-size=2 : Одновременных запросов к источнику, 1–4}
+        {--batch-size=2 : Размер пакета городов, запросы выполняются последовательно}
         {--sleep-ms=150 : Задержка между пачками запросов}
         {--outfile=krasnoeibeloe_vacancies : Базовое имя XML}';
 
@@ -181,14 +180,14 @@ class CollectVacancies extends Command
                 }
             }
             if ($needed !== []) {
-                $fetched = Http::pool(function (Pool $pool) use ($needed) {
-                    foreach ($needed as $index => $city) {
-                        $pool->as((string) $index)->timeout(120)->connectTimeout(15)->acceptJson()
-                            ->get(self::API, ['region' => $city['region'], 'city' => $city['city']]);
-                    }
-                });
                 foreach ($needed as $index => $city) {
-                    $entities = $this->parseResponse($fetched[(string) $index] ?? null, $city, true);
+                    try {
+                        $response = Http::timeout(120)->connectTimeout(15)->acceptJson()
+                            ->get(self::API, ['region' => $city['region'], 'city' => $city['city']]);
+                        $entities = $this->parseResponse($response, $city, true);
+                    } catch (\Throwable) {
+                        $entities = null;
+                    }
                     for ($attempt = 1; $entities === null && $attempt <= 3; $attempt++) {
                         $this->warn("Повтор города {$city['region']}, {$city['city']}: попытка {$attempt}");
                         sleep($attempt);

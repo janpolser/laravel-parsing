@@ -106,7 +106,6 @@ class CollectWbVacancies extends Command
             'curl' => [
                 CURLOPT_TIMEOUT => 20,
                 CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_FOLLOWLOCATION => true,
                 CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
             ],
         ])
@@ -201,7 +200,6 @@ class CollectWbVacancies extends Command
             'curl' => [
                 CURLOPT_TIMEOUT => 20,
                 CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_FOLLOWLOCATION => true,
                 CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
             ],
         ])->withHeaders([
@@ -273,7 +271,6 @@ class CollectWbVacancies extends Command
             'curl' => [
                 CURLOPT_TIMEOUT => 20,
                 CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_FOLLOWLOCATION => true,
                 CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
             ],
         ])->withHeaders([
