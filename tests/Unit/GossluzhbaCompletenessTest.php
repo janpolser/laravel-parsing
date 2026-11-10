@@ -70,3 +70,31 @@ test('the delay applies between configuration and list requests', function () {
 
     expect($times)->toHaveCount(2)->and($times[1] - $times[0])->toBeGreaterThanOrEqual(1.9);
 });
+
+test('a complete multi-page feed contains every vacancy', function () {
+    Http::fake(function (Request $request) {
+        $path = parse_url($request->url(), PHP_URL_PATH);
+        if (str_contains($path, 'private-get')) {
+            return Http::response([]);
+        }
+        if (str_contains($path, 'get-vacancies')) {
+            $id = (string) $request['page'];
+
+            return Http::response([
+                'vacancies' => [['id' => $id, 'caption' => 'Специалист '.$id, 'organizationName' => 'Организация']],
+                'pageCount' => 2,
+                'total' => 2,
+            ]);
+        }
+
+        return Http::response(['vacancy' => ['caption' => 'Специалист', 'organizationName' => 'Организация']]);
+    });
+
+    $this->artisan('gossluzhba:collect-vacancies', [
+        '--request-delay-min-ms' => 2000,
+        '--request-delay-max-ms' => 2000,
+    ])->assertSuccessful();
+
+    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(2);
+    Http::assertSentCount(5);
+});
