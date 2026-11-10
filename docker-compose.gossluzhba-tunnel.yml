@@ -1,0 +1,62 @@
+services:
+  gossluzhba-local-proxy:
+    image: gogost/gost:3.3.0
+    profiles: [gossluzhba-local]
+    network_mode: host
+    command: ["-L", "socks5://127.0.0.1:${GOSSLUZHBA_LOCAL_PROXY_PORT:-1080}"]
+    restart: unless-stopped
+
+  gossluzhba-reverse-tunnel:
+    build:
+      context: .
+      dockerfile: docker/gossluzhba-tunnel/Dockerfile
+    profiles: [gossluzhba-local]
+    network_mode: host
+    depends_on: [gossluzhba-local-proxy]
+    volumes:
+      - ${GOSSLUZHBA_SSH_PRIVATE_KEY_PATH:-/dev/null}:/run/secrets/ssh_key:ro
+      - ${GOSSLUZHBA_SSH_KNOWN_HOSTS_PATH:-/dev/null}:/run/secrets/known_hosts:ro
+    command:
+      - -N
+      - -T
+      - -F
+      - /dev/null
+      - -o
+      - BatchMode=yes
+      - -o
+      - IdentitiesOnly=yes
+      - -o
+      - StrictHostKeyChecking=yes
+      - -o
+      - UserKnownHostsFile=/run/secrets/known_hosts
+      - -o
+      - ExitOnForwardFailure=yes
+      - -o
+      - ServerAliveInterval=30
+      - -o
+      - ServerAliveCountMax=3
+      - -i
+      - /run/secrets/ssh_key
+      - -R
+      - 127.0.0.1:${GOSSLUZHBA_REMOTE_PROXY_PORT:-19080}:127.0.0.1:${GOSSLUZHBA_LOCAL_PROXY_PORT:-1080}
+      - ${PROD_SSH_TARGET:-deploy@80.93.187.99}
+    restart: unless-stopped
+
+  gossluzhba-runner:
+    image: laravel-parsing-app
+    profiles: [gossluzhba-server]
+    network_mode: host
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+      - ./docker/php/conf.d/project.ini:/usr/local/etc/php/conf.d/zz-project.ini:ro
+      - ./docker/gossluzhba-tunnel/crontab:/etc/gossluzhba-crontab:ro
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+      GOSSLUZHBA_PROXIES: socks5h://127.0.0.1:${GOSSLUZHBA_REMOTE_PROXY_PORT:-19080}
+    command: ["supercronic", "/etc/gossluzhba-crontab"]
+    restart: unless-stopped
+
+  app:
+    environment:
+      GOSSLUZHBA_EXTERNAL_RUNNER: ${GOSSLUZHBA_EXTERNAL_RUNNER:-false}

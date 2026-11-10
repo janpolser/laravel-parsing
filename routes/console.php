@@ -82,16 +82,18 @@ Schedule::command('hirehi:parse-vacancies')
 // Gossluzhba
 Schedule::command('gossluzhba:collect-vacancies --details-limit=0 --sleep-ms=1500 --refresh-days=30 --without-tls-verify')
     ->cron('0 7 * * 0')
+    ->when(fn () => !filter_var(env('GOSSLUZHBA_EXTERNAL_RUNNER', false), FILTER_VALIDATE_BOOLEAN))
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
 // Создание архивов
 Schedule::command('xml:tar gossluzhba')
     ->cron('0 10 * * 0')
+    ->when(fn () => !filter_var(env('GOSSLUZHBA_EXTERNAL_RUNNER', false), FILTER_VALIDATE_BOOLEAN))
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
 
-Schedule::command('xml:tar --exclude=hirehi')
+Schedule::command('xml:tar --exclude=hirehi --exclude=gossluzhba')
     ->cron('0 7 * * 0')
     ->appendOutputTo('/proc/1/fd/1')
     ->withoutOverlapping();
