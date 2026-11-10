@@ -17,7 +17,8 @@ class ParseVacancies extends Command
                             {--max-pages=0 : Максимум страниц (0 - все)}
                             {--start-page=1 : Первая страница для выборочного обновления}
                             {--end-page=0 : Последняя страница для выборочного обновления (0 - до конца)}
-                            {--request-delay-ms=3000 : Минимальная пауза между запросами к HireHi API, мс}
+                            {--request-delay-min-ms=2000 : Минимальная пауза между запросами к HireHi API, мс}
+                            {--request-delay-max-ms=4000 : Максимальная пауза между запросами к HireHi API, мс}
                             {--max-retries=5 : Повторов для 429 и временных ошибок API}
                             {--retry-delay-seconds=60 : Начальная пауза перед повтором, секунд}
                             {--proxy=* : Optional HTTP/SOCKS proxy URL, can be repeated}';
@@ -51,7 +52,9 @@ class ParseVacancies extends Command
         '(' => '', ')' => '', '[' => '', ']' => '', '{' => '', '}' => '',
     ];
 
-    private int $requestDelayMs = 3000;
+    private int $requestDelayMinMs = 2000;
+
+    private int $requestDelayMaxMs = 4000;
 
     private int $maxRetries = 5;
 
@@ -73,11 +76,41 @@ class ParseVacancies extends Command
         $endPage = (int) $this->option('end-page');
         $timeout = 60;
 
-        $this->requestDelayMs = max(250, (int) $this->option('request-delay-ms'));
+        $this->requestDelayMinMs = max(2000, (int) $this->option('request-delay-min-ms'));
+        $this->requestDelayMaxMs = max(
+            $this->requestDelayMinMs,
+            (int) $this->option('request-delay-max-ms')
+        );
         $this->maxRetries = max(0, (int) $this->option('max-retries'));
         $this->retryDelaySeconds = max(5, (int) $this->option('retry-delay-seconds'));
         $this->proxies = $this->resolveProxies();
         $this->proxyCursor = 0;
+
+        if ($this->isDisabledAfter403()) {
+            $this->error('HireHi отключён после HTTP 403. API-запросы не выполняются.');
+
+            return Command::FAILURE;
+        }
+
+        $pauseUntil = $this->readPauseUntil();
+        if ($pauseUntil !== null && $pauseUntil > time()) {
+            $this->warn('HireHi поставлен на паузу до ' . date('c', $pauseUntil) . '. Запросы не выполняются.');
+
+            return Command::FAILURE;
+        }
+
+        if (is_file($this->pausePath()) && !is_file($this->probeCompletedPath())) {
+            $this->probeAllProxies();
+            file_put_contents($this->probeCompletedPath(), date('c') . PHP_EOL, LOCK_EX);
+
+            return Command::FAILURE;
+        }
+
+        if (is_file($this->pausePath())) {
+            $this->error('Контроль HireHi уже выполнен. API-запросы не выполняются.');
+
+            return Command::FAILURE;
+        }
 
         date_default_timezone_set('Europe/Moscow');
         ini_set('memory_limit', '8G');
@@ -380,6 +413,11 @@ class ParseVacancies extends Command
 
             $lastResponse = $response;
 
+            if ($response->status() === 403) {
+                $this->disableAfter403();
+                throw new \RuntimeException('HireHi вернул HTTP 403. Останавливаем команду без повторных запросов.');
+            }
+
             $retryableStatus = in_array($response->status(), [429, 500, 502, 503, 504], true)
                 || ($this->proxies !== [] && in_array($response->status(), [401, 403, 407], true));
             if ($response->successful() || !$retryableStatus) {
@@ -398,6 +436,81 @@ class ParseVacancies extends Command
         }
 
         return $lastResponse;
+    }
+
+    private function isDisabledAfter403(): bool
+    {
+        return is_file(storage_path('app/private/hirehi.disabled'));
+    }
+
+    private function pausePath(): string
+    {
+        return storage_path('app/private/hirehi.pause_until');
+    }
+
+    private function probeCompletedPath(): string
+    {
+        return storage_path('app/private/hirehi.probe_completed');
+    }
+
+    private function probeAllProxies(): void
+    {
+        $url = 'https://hirehi.ru/api/search/jobs';
+        $query = [
+            'page' => 1,
+            'limit' => 1,
+            'sort' => 'date',
+            'category' => 'development',
+            'include_counts' => 'true',
+        ];
+
+        if ($this->proxies === []) {
+            $this->error('HireHi probe: прокси не настроены, прямой запрос запрещён.');
+
+            return;
+        }
+
+        foreach ($this->proxies as $proxy) {
+            try {
+                $response = Http::timeout(20)
+                    ->acceptJson()
+                    ->withOptions(['proxy' => $proxy])
+                    ->withHeaders([
+                        'User-Agent' => 'Mozilla/5.0 (compatible; vacancy-feed/1.0)',
+                        'Referer' => 'https://hirehi.ru/',
+                        'X-Requested-With' => 'XMLHttpRequest',
+                    ])
+                    ->get($url, $query);
+
+                $this->warn('HireHi probe ' . ($this->maskProxy($proxy) ?? 'proxy') . ': HTTP ' . $response->status());
+            } catch (ConnectionException $exception) {
+                $this->warn('HireHi probe ' . ($this->maskProxy($proxy) ?? 'proxy') . ': network error');
+            }
+        }
+    }
+
+    private function disableAfter403(): void
+    {
+        $path = storage_path('app/private/hirehi.disabled');
+        @mkdir(dirname($path), 0750, true);
+        file_put_contents($path, date('c') . PHP_EOL, LOCK_EX);
+    }
+
+    private function readPauseUntil(): ?int
+    {
+        $path = storage_path('app/private/hirehi.pause_until');
+        if (!is_file($path)) {
+            return null;
+        }
+
+        $value = trim((string) file_get_contents($path));
+        if ($value === '' || !ctype_digit($value)) {
+            return null;
+        }
+
+        $timestamp = (int) $value;
+
+        return $timestamp > time() ? $timestamp : null;
     }
 
     private function resolveProxies(): array
@@ -480,7 +593,8 @@ class ParseVacancies extends Command
     private function waitForRequestSlot(): void
     {
         if ($this->lastRequestAt !== null) {
-            $waitMicroseconds = (int) (($this->requestDelayMs / 1000 - (microtime(true) - $this->lastRequestAt)) * 1_000_000);
+            $delayMs = random_int($this->requestDelayMinMs, $this->requestDelayMaxMs);
+            $waitMicroseconds = (int) (($delayMs / 1000 - (microtime(true) - $this->lastRequestAt)) * 1_000_000);
 
             if ($waitMicroseconds > 0) {
                 usleep($waitMicroseconds);
