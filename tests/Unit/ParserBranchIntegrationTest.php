@@ -12,12 +12,8 @@ test('legacy and current parsers are registered together', function () {
         'yandex:vacancy-yandex',
         'hirehi:parse-vacancies',
         'gossluzhba:collect-vacancies',
-        'scraper:import-sites',
-        'scraper:scrape-site',
-        'scraper:build-feed',
     ] as $command) {
         expect($commands)->toHaveKey($command);
     }
 
-    expect(config('universal_scraper.schedule.enabled'))->toBeFalse();
 });

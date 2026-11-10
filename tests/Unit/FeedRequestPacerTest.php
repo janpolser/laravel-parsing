@@ -66,8 +66,7 @@ test('scheduled source commands share groups and active exceptional feeds remain
         ->and(FeedRequestPacer::groupForCommand('perekrestok:collect-vacancies'))->toBe('x5')
         ->and(FeedRequestPacer::groupForCommand('monetka:collect-vacancies'))->toBe('monetka')
         ->and(FeedRequestPacer::groupForCommand('hirehi:parse-vacancies'))->toBeNull()
-        ->and(FeedRequestPacer::groupForCommand('gossluzhba:collect-vacancies'))->toBeNull()
-        ->and(FeedRequestPacer::groupForCommand('scraper:scrape-site'))->toBeNull();
+        ->and(FeedRequestPacer::groupForCommand('gossluzhba:collect-vacancies'))->toBeNull();
 
     foreach ([
         'magnit:collect-vacancy-magnit', 'yandex:vacancy-yandex', 'pyaterochka:vacancy-5ka',

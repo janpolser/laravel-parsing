@@ -12,7 +12,6 @@ libjpeg62-turbo-dev \
 libfreetype6-dev \
 libcurl4-openssl-dev \
 libssl-dev \
-libpq-dev \
 libonig-dev \
 gnupg \
 ca-certificates \
@@ -31,11 +30,7 @@ gd \
 pcntl \
 bcmath \
 sockets \
-curl \
-pdo_pgsql
-
-RUN pecl install redis \
-&& docker-php-ext-enable redis
+curl
 
 RUN git config --global --add safe.directory /var/www
 
