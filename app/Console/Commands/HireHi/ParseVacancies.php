@@ -17,8 +17,9 @@ class ParseVacancies extends Command
                             {--max-pages=0 : Максимум страниц (0 - все)}
                             {--start-page=1 : Первая страница для выборочного обновления}
                             {--end-page=0 : Последняя страница для выборочного обновления (0 - до конца)}
-                            {--request-delay-min-ms=2000 : Минимальная пауза между запросами к HireHi API, мс}
-                            {--request-delay-max-ms=4000 : Максимальная пауза между запросами к HireHi API, мс}
+                            {--request-delay-min-ms=4000 : Минимальная пауза между запросами к HireHi API, мс}
+                            {--request-delay-max-ms=10000 : Максимальная пауза между запросами к HireHi API, мс}
+                            {--detail-retry-passes=2 : Дополнительных проходов по неудачным карточкам}
                             {--max-retries=5 : Повторов для 429 и временных ошибок API}
                             {--retry-delay-seconds=60 : Начальная пауза перед повтором, секунд}
                             {--proxy=* : Optional HTTP/SOCKS proxy URL, can be repeated}';
@@ -65,6 +66,8 @@ class ParseVacancies extends Command
     private array $proxies = [];
 
     private int $proxyCursor = 0;
+
+    private string $lastDetailFailure = '';
 
     public function handle(YandexFeedXmlFormat $xml)
     {
@@ -118,199 +121,257 @@ class ParseVacancies extends Command
         $categorySlug = $this->categoryMap[$category] ?? $this->slugify($category);
 
         try {
-            $baseUrl = 'https://hirehi.ru/api/search/jobs';
-
-            // Первый запрос с include_counts=true
-            $queryParams = [
-                'page' => 1,
-                'limit' => $perPage,
-                'sort' => 'date',
-                'category' => $category,
-                'include_counts' => 'true',
-            ];
-
-            if ($search) {
-                $queryParams['search'] = $search;
+            $key = hash('sha256', json_encode([$category, $search, $maxPages, $startPage, $endPage], JSON_THROW_ON_ERROR));
+            $checkpointDir = storage_path('app/private/hirehi-checkpoints/' . $key);
+            if (!is_dir($checkpointDir) && !mkdir($checkpointDir, 0700, true) && !is_dir($checkpointDir)) {
+                throw new \RuntimeException('Не удалось создать каталог состояния HireHi');
+            }
+            $lock = fopen($checkpointDir . '/lock', 'c');
+            if ($lock === false || !flock($lock, LOCK_EX | LOCK_NB)) {
+                throw new \RuntimeException('Сбор с такими параметрами уже выполняется');
+            }
+            $snapshotPath = $checkpointDir . '/snapshot.json';
+            $completedPath = $checkpointDir . '/completed';
+            if (is_file($completedPath)) {
+                foreach (glob($checkpointDir . '/detail-*.json') ?: [] as $file) {
+                    if (!unlink($file)) {
+                        throw new \RuntimeException('Не удалось очистить прежнее состояние HireHi');
+                    }
+                }
+                if (is_file($snapshotPath) && !unlink($snapshotPath)) {
+                    throw new \RuntimeException('Не удалось очистить прежний список HireHi');
+                }
+                if (!unlink($completedPath)) {
+                    throw new \RuntimeException('Не удалось очистить отметку завершения HireHi');
+                }
             }
 
-            $this->info('Начинаем парсинг вакансий...');
-            $this->info("Категория: {$category}");
-            if ($search) {
-                $this->info("Поиск: {$search}");
-            }
-            $this->info('Маршрутов HireHi: ' . (empty($this->proxies) ? 'direct' : count($this->proxies)));
-
-            $response = $this->requestHireHi($baseUrl, $queryParams, $timeout);
-
-            if ($response === null || $response->failed()) {
-                $this->error('Ошибка при получении данных: ' . ($response?->status() ?? 'network error'));
-
-                return Command::FAILURE;
-            }
-
-            $data = $response->json();
-
-            // Подсчитываем общее количество через filter_counts.format или initial_filter_counts.format
-            $formatCounts = $data['filter_counts']['format'] ?? $data['initial_filter_counts']['format'] ?? [];
-            $totalCount = 0;
-
-            if (!empty($formatCounts)) {
-                $hybridCount = (int) ($formatCounts['гибрид'] ?? 0);
-                $officeCount = (int) ($formatCounts['офис'] ?? 0);
-                $remoteCount = (int) ($formatCounts['удалённо'] ?? 0);
-                $remoteRussiaCount = (int) ($formatCounts['удалённо по РФ'] ?? 0);
-                $totalCount = $hybridCount + $officeCount + $remoteCount + $remoteRussiaCount;
-
-                $this->info("Каунты: гибрид({$hybridCount}) + офис({$officeCount}) + удалённо({$remoteCount}) + удалённо_по_рф({$remoteRussiaCount}) = {$totalCount}");
-            }
-
-            if ($totalCount === 0) {
-                $this->error('Нет вакансий для обработки');
-
-                return Command::FAILURE;
-            }
-
-            $totalPages = (int) ceil($totalCount / $perPage);
-
-            // Если задан лимит страниц
-            if ($maxPages > 0 && $totalPages > $maxPages) {
-                $totalPages = $maxPages;
-                $this->info("Ограничение страниц до: {$totalPages}");
+            if (is_file($snapshotPath)) {
+                $snapshot = json_decode(file_get_contents($snapshotPath), true, 512, JSON_THROW_ON_ERROR);
+                $vacanciesById = $snapshot['vacancies'];
+                $duplicateCount = $snapshot['duplicates'];
+                $this->info('Продолжаем сохранённый сбор HireHi.');
             } else {
-                $this->info("Всего страниц для обработки: {$totalPages}");
-            }
+                $baseUrl = 'https://hirehi.ru/api/search/jobs';
 
-            if ($endPage > 0) {
-                $totalPages = min($totalPages, $endPage);
-            }
-            if ($startPage > $totalPages) {
-                $this->error('Первая страница выходит за пределы доступного диапазона');
+                // Первый запрос с include_counts=true
+                $queryParams = [
+                    'page' => 1,
+                    'limit' => $perPage,
+                    'sort' => 'date',
+                    'category' => $category,
+                    'include_counts' => 'true',
+                ];
 
-                return Command::FAILURE;
-            }
-
-            $vacanciesById = [];
-            $duplicateCount = 0;
-
-            $progressBar = $this->output->createProgressBar($totalPages - $startPage + 1);
-            $progressBar->start();
-
-            // Для последующих запросов отключаем include_counts
-            $queryParams['include_counts'] = 'false';
-
-            for ($i = $startPage; $i <= $totalPages; $i++) {
-                try {
-                    $queryParams['page'] = $i;
-
-                    $response = $this->requestHireHi($baseUrl, $queryParams, $timeout);
-
-                    if ($response === null || $response->failed()) {
-                        throw new \RuntimeException("Ошибка при запросе страницы $i: " . ($response?->status() ?? 'network error'));
-                    }
-
-                    $pageData = $response->json();
-
-                    // В ответе поле 'jobs', а не 'items'
-                    if (!isset($pageData['jobs']) || empty($pageData['jobs'])) {
-                        throw new \RuntimeException("Нет данных на странице $i");
-                    }
-
-                    foreach ($pageData['jobs'] as $vacancy) {
-                        $vacancyId = $vacancy['id'] ?? null;
-                        $vacancyName = $vacancy['title'] ?? 'Без названия';
-
-                        if (!$vacancyId) {
-                            continue;
-                        }
-
-                        $vacancyId = (string) $vacancyId;
-                        if (isset($vacanciesById[$vacancyId])) {
-                            $duplicateCount++;
-
-                            continue;
-                        }
-
-                        $vacanciesById[$vacancyId] = $vacancy;
-                    }
-
-                } catch (ConnectionException $e) {
-                    throw new \RuntimeException("Таймаут на странице $i: " . $e->getMessage(), 0, $e);
-                } catch (\Exception $e) {
-                    throw new \RuntimeException("Ошибка на странице $i: " . $e->getMessage(), 0, $e);
+                if ($search) {
+                    $queryParams['search'] = $search;
                 }
 
-                $progressBar->advance();
-            }
+                $this->info('Начинаем парсинг вакансий...');
+                $this->info("Категория: {$category}");
+                if ($search) {
+                    $this->info("Поиск: {$search}");
+                }
+                $this->info('Маршрутов HireHi: ' . (empty($this->proxies) ? 'direct' : count($this->proxies)));
 
-            $progressBar->finish();
-            $this->newLine(2);
+                $response = $this->requestHireHi($baseUrl, $queryParams, $timeout);
 
-            if (empty($vacanciesById)) {
-                $this->error('Не удалось собрать ни одной вакансии');
+                if ($response === null || $response->failed()) {
+                    $this->error('Ошибка при получении данных: ' . ($response?->status() ?? 'network error'));
 
-                return Command::FAILURE;
+                    return Command::FAILURE;
+                }
+
+                $data = $response->json();
+
+                // Подсчитываем общее количество через filter_counts.format или initial_filter_counts.format
+                $formatCounts = $data['filter_counts']['format'] ?? $data['initial_filter_counts']['format'] ?? [];
+                $totalCount = 0;
+
+                if (!empty($formatCounts)) {
+                    $hybridCount = (int) ($formatCounts['гибрид'] ?? 0);
+                    $officeCount = (int) ($formatCounts['офис'] ?? 0);
+                    $remoteCount = (int) ($formatCounts['удалённо'] ?? 0);
+                    $remoteRussiaCount = (int) ($formatCounts['удалённо по РФ'] ?? 0);
+                    $totalCount = $hybridCount + $officeCount + $remoteCount + $remoteRussiaCount;
+
+                    $this->info("Каунты: гибрид({$hybridCount}) + офис({$officeCount}) + удалённо({$remoteCount}) + удалённо_по_рф({$remoteRussiaCount}) = {$totalCount}");
+                }
+
+                if ($totalCount === 0) {
+                    $this->error('Нет вакансий для обработки');
+
+                    return Command::FAILURE;
+                }
+
+                $totalPages = (int) ceil($totalCount / $perPage);
+
+                // Если задан лимит страниц
+                if ($maxPages > 0 && $totalPages > $maxPages) {
+                    $totalPages = $maxPages;
+                    $this->info("Ограничение страниц до: {$totalPages}");
+                } else {
+                    $this->info("Всего страниц для обработки: {$totalPages}");
+                }
+
+                if ($endPage > 0) {
+                    $totalPages = min($totalPages, $endPage);
+                }
+                if ($startPage > $totalPages) {
+                    $this->error('Первая страница выходит за пределы доступного диапазона');
+
+                    return Command::FAILURE;
+                }
+
+                $vacanciesById = [];
+                $duplicateCount = 0;
+
+                $progressBar = $this->output->createProgressBar($totalPages - $startPage + 1);
+                $progressBar->start();
+
+                // Для последующих запросов отключаем include_counts
+                $queryParams['include_counts'] = 'false';
+
+                for ($i = $startPage; $i <= $totalPages; $i++) {
+                    try {
+                        $queryParams['page'] = $i;
+
+                        $response = $this->requestHireHi($baseUrl, $queryParams, $timeout);
+
+                        if ($response === null || $response->failed()) {
+                            throw new \RuntimeException("Ошибка при запросе страницы $i: " . ($response?->status() ?? 'network error'));
+                        }
+
+                        $pageData = $response->json();
+
+                        // В ответе поле 'jobs', а не 'items'
+                        if (!isset($pageData['jobs']) || empty($pageData['jobs'])) {
+                            throw new \RuntimeException("Нет данных на странице $i");
+                        }
+
+                        foreach ($pageData['jobs'] as $vacancy) {
+                            $vacancyId = $vacancy['id'] ?? null;
+                            $vacancyName = $vacancy['title'] ?? 'Без названия';
+
+                            if (!$vacancyId) {
+                                continue;
+                            }
+
+                            $vacancyId = (string) $vacancyId;
+                            if (isset($vacanciesById[$vacancyId])) {
+                                $duplicateCount++;
+
+                                continue;
+                            }
+
+                            $vacanciesById[$vacancyId] = $vacancy;
+                        }
+
+                    } catch (ConnectionException $e) {
+                        throw new \RuntimeException("Таймаут на странице $i: " . $e->getMessage(), 0, $e);
+                    } catch (\Exception $e) {
+                        throw new \RuntimeException("Ошибка на странице $i: " . $e->getMessage(), 0, $e);
+                    }
+
+                    $progressBar->advance();
+                }
+
+                $progressBar->finish();
+                $this->newLine(2);
+
+                if (empty($vacanciesById)) {
+                    $this->error('Не удалось собрать ни одной вакансии');
+
+                    return Command::FAILURE;
+                }
+
+                $this->writeCheckpoint($snapshotPath, ['vacancies' => $vacanciesById, 'duplicates' => $duplicateCount]);
             }
 
             $this->info('Список зафиксирован, уникальных вакансий: ' . count($vacanciesById));
 
             $editedVacancies = [];
-            $descriptionCache = [];
+            $detailPasses = max(0, (int) $this->option('detail-retry-passes')) + 1;
+            for ($pass = 0; $pass < $detailPasses; $pass++) {
+                foreach ($vacanciesById as $vacancyId => $vacancy) {
+                    $detailPath = $checkpointDir . '/detail-' . hash('sha256', (string) $vacancyId) . '.json';
+                    $detail = is_file($detailPath)
+                        ? json_decode(file_get_contents($detailPath), true, 512, JSON_THROW_ON_ERROR)
+                        : null;
+                    if (($detail['status'] ?? null) === 'success') {
+                        $editedVacancies[$vacancyId] = $detail['vacancy'];
 
-            foreach ($vacanciesById as $vacancyId => $vacancy) {
-                $vacancyName = $vacancy['title'] ?? 'Без названия';
+                        continue;
+                    }
+                    if (($detail['attempts'] ?? 0) > $pass) {
+                        continue;
+                    }
+                    $vacancyName = $vacancy['title'] ?? 'Без названия';
 
-                // Формируем URL
-                $nameSlug = $this->slugify($vacancyName);
-                $vacancyUrl = "https://hirehi.ru/{$categorySlug}/{$nameSlug}-{$vacancyId}";
+                    // Формируем URL
+                    $nameSlug = $this->slugify($vacancyName);
+                    $vacancyUrl = "https://hirehi.ru/{$categorySlug}/{$nameSlug}-{$vacancyId}";
 
-                // Парсим дату создания
-                $creationDate = $this->parseDate($vacancy['created_at'] ?? null);
+                    // Парсим дату создания
+                    $creationDate = $this->parseDate($vacancy['created_at'] ?? null);
 
-                // Получаем описание (с кэшированием по ID вакансии)
-                $cacheKey = $vacancyId;
-                if (isset($descriptionCache[$cacheKey])) {
-                    $description = $descriptionCache[$cacheKey];
-                } else {
                     $description = $this->getVacancyDescription($vacancyId);
-                    $descriptionCache[$cacheKey] = $description;
+                    if ($description === null || trim($description) === '') {
+                        $this->writeCheckpoint($detailPath, [
+                            'id' => (string) $vacancyId,
+                            'status' => 'failed',
+                            'attempts' => $pass + 1,
+                            'reason' => $this->lastDetailFailure ?: 'empty description',
+                        ]);
+
+                        continue;
+                    }
+
+                    // Замена NDA на "Анонимный Работодатель"
+                    $companyName = $vacancy['company'] ?? 'HireHi';
+                    $companyName = $this->anonymizeCompany($companyName);
+
+                    $editedVacancy = [
+                        'url' => $vacancyUrl,
+                        'mobile_url' => $vacancyUrl,
+                        'creation_date' => $creationDate,
+                        'job_name' => $vacancyName,
+                        'description' => $description,
+                        'company_name' => $companyName,
+                        'hr_agency' => 'false',
+                        'category' => ['industry' => $category],
+                    ];
+
+                    // Зарплата - форматируем в читаемый вид
+                    $salaryStr = $vacancy['salary'] ?? '';
+                    $editedVacancy['salary'] = $this->formatSalary($salaryStr);
+                    $editedVacancy['currency'] = 'RUB';
+
+                    // Формат работы (строка типа "офис Ереван", "удалённо", "гибрид Алматы")
+                    $workFormat = $vacancy['format'] ?? '';
+                    $editedVacancy['employment'] = $this->detectEmployment($workFormat);
+                    $editedVacancy['schedule'] = $workFormat;
+
+                    // Уровень (junior/middle/senior/lead)
+                    if (!empty($vacancy['level'])) {
+                        $editedVacancy['experience'] = $this->mapExperience($vacancy['level']);
+                    }
+
+                    // Адрес берем из поля format (там "тип город")
+                    $location = $this->extractLocation($workFormat);
+                    $editedVacancy['addresses']['address']['location'] = $location;
+
+                    $this->writeCheckpoint($detailPath, [
+                        'id' => (string) $vacancyId,
+                        'status' => 'success',
+                        'attempts' => $pass + 1,
+                        'vacancy' => $editedVacancy,
+                    ]);
+                    $editedVacancies[$vacancyId] = $editedVacancy;
                 }
-
-                // Замена NDA на "Анонимный Работодатель"
-                $companyName = $vacancy['company'] ?? 'HireHi';
-                $companyName = $this->anonymizeCompany($companyName);
-
-                $editedVacancy = [
-                    'url' => $vacancyUrl,
-                    'mobile_url' => $vacancyUrl,
-                    'creation_date' => $creationDate,
-                    'job_name' => $vacancyName,
-                    'description' => $description,
-                    'company_name' => $companyName,
-                    'hr_agency' => 'false',
-                    'category' => ['industry' => $category],
-                ];
-
-                // Зарплата - форматируем в читаемый вид
-                $salaryStr = $vacancy['salary'] ?? '';
-                $editedVacancy['salary'] = $this->formatSalary($salaryStr);
-                $editedVacancy['currency'] = 'RUB';
-
-                // Формат работы (строка типа "офис Ереван", "удалённо", "гибрид Алматы")
-                $workFormat = $vacancy['format'] ?? '';
-                $editedVacancy['employment'] = $this->detectEmployment($workFormat);
-                $editedVacancy['schedule'] = $workFormat;
-
-                // Уровень (junior/middle/senior/lead)
-                if (!empty($vacancy['level'])) {
-                    $editedVacancy['experience'] = $this->mapExperience($vacancy['level']);
-                }
-
-                // Адрес берем из поля format (там "тип город")
-                $location = $this->extractLocation($workFormat);
-                $editedVacancy['addresses']['address']['location'] = $location;
-
-                $editedVacancies[$vacancyId] = $editedVacancy;
             }
+            $failedCount = count($vacanciesById) - count($editedVacancies);
+            $this->warn("Пропущено недоступных карточек: {$failedCount}. Состояние: {$checkpointDir}");
 
             $editedVacancies = array_values($editedVacancies);
             $processedCount = count($editedVacancies);
@@ -325,6 +386,18 @@ class ParseVacancies extends Command
                 $xmlPath
             );
 
+            $failedDetails = [];
+            foreach (glob($checkpointDir . '/detail-*.json') ?: [] as $detailFile) {
+                $detail = json_decode(file_get_contents($detailFile), true, 512, JSON_THROW_ON_ERROR);
+                if ($detail['status'] === 'failed') {
+                    $failedDetails[] = $detail;
+                }
+            }
+            $this->writeCheckpoint($checkpointDir . '/report-' . bin2hex(random_bytes(8)) . '.json', [
+                'completed_at' => date('c'),
+                'failed' => $failedDetails,
+            ]);
+            $this->writeCheckpoint($completedPath, ['completed_at' => date('c'), 'failed' => $failedCount]);
             $this->info("✅ Готово! Обработано вакансий: {$processedCount}");
             $this->info("Пропущено дублей по ID: {$duplicateCount}");
             $this->info("💾 Файл сохранён: {$xmlPath}");
@@ -346,13 +419,16 @@ class ParseVacancies extends Command
     /**
      * Получить детальное описание вакансии по ID
      */
-    private function getVacancyDescription($vacancyId): string
+    private function getVacancyDescription($vacancyId): ?string
     {
         $response = $this->requestHireHi("https://hirehi.ru/api/jobs/{$vacancyId}", [], 30);
 
         if ($response === null || $response->failed()) {
-            return '';
+            $this->lastDetailFailure = $response === null ? 'network error' : 'HTTP ' . $response->status();
+
+            return null;
         }
+        $this->lastDetailFailure = '';
 
         $data = $response->json();
 
@@ -436,6 +512,15 @@ class ParseVacancies extends Command
         }
 
         return $lastResponse;
+    }
+
+    private function writeCheckpoint(string $path, array $data): void
+    {
+        $temporary = $path . '.tmp';
+        $json = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        if (file_put_contents($temporary, $json, LOCK_EX) === false || !rename($temporary, $path)) {
+            throw new \RuntimeException('Не удалось сохранить состояние HireHi: ' . $path);
+        }
     }
 
     private function isDisabledAfter403(): bool

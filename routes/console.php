@@ -6,7 +6,8 @@ use Illuminate\Support\Facades\Schedule;
 
 // Магнит
 Schedule::command('magnit:collect-vacancy-magnit')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 2')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'magnit']);
@@ -18,19 +19,34 @@ Schedule::command('magnit:collect-vacancy-magnit')
 
 // Яндекс
 Schedule::command('yandex:vacancy-yandex')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 3')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'yandex']);
+        if ($exitCode !== 0) {
+            Log::error('Не удалось создать архив фида yandex', ['output' => Artisan::output()]);
+        }
+    })
     ->withoutOverlapping();
 
 // Пятерочка
 Schedule::command('pyaterochka:vacancy-5ka')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 1')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => '5ka']);
+        if ($exitCode !== 0) {
+            Log::error('Не удалось создать архив фида 5ka', ['output' => Artisan::output()]);
+        }
+    })
     ->withoutOverlapping();
 
 // Перекрёсток
 Schedule::command('perekrestok:collect-vacancies')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 1')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'perekrestok']);
@@ -43,6 +59,7 @@ Schedule::command('perekrestok:collect-vacancies')
 // Красное&Белое
 Schedule::command('krasnoeibeloe:collect-vacancies')
     ->cron('0 7 * * 0')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'krasnoeibeloe']);
@@ -55,19 +72,40 @@ Schedule::command('krasnoeibeloe:collect-vacancies')
 
 // РЖД
 Schedule::command('rzhd:collect-vacancies')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 4')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'rzhd']);
+        if ($exitCode !== 0) {
+            Log::error('Не удалось создать архив фида rzhd', ['output' => Artisan::output()]);
+        }
+    })
     ->withoutOverlapping();
 
 // WB
 Schedule::command('wb:collect-wb-vacancies')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 6')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        foreach (['wb:generate-courier-vacancies', 'wb:generate-driver-ce-vacancies', 'wb:generate-driver-b-vacancies', 'wb:generate-storage-vacancies'] as $command) {
+            if (Artisan::call($command) !== 0) {
+                Log::error('Не удалось подготовить дополнительный фид WB', ['command' => $command, 'output' => Artisan::output()]);
+
+                return;
+            }
+        }
+        if (Artisan::call('xml:tar', ['source' => 'wb']) !== 0) {
+            Log::error('Не удалось создать архив фида WB', ['output' => Artisan::output()]);
+        }
+    })
     ->withoutOverlapping();
 
 // Ozon
 Schedule::command('ozon:collect-vacancies')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 6')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'ozon']);
@@ -79,7 +117,8 @@ Schedule::command('ozon:collect-vacancies')
 
 // Лента
 Schedule::command('lenta:collect-vacancies')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 4')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'lenta']);
@@ -91,7 +130,8 @@ Schedule::command('lenta:collect-vacancies')
 
 // Монетка
 Schedule::command('monetka:collect-vacancies')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 5')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'monetka']);
@@ -103,7 +143,8 @@ Schedule::command('monetka:collect-vacancies')
 
 // ДИКСИ
 Schedule::command('dixy:collect-vacancies')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 2')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'dixy']);
@@ -114,7 +155,8 @@ Schedule::command('dixy:collect-vacancies')
     ->withoutOverlapping();
 
 Schedule::command('monetka:collect-vacancies --section=pekarni')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 5')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'monetka-pekarni']);
@@ -127,6 +169,7 @@ Schedule::command('monetka:collect-vacancies --section=pekarni')
 // ВкусВилл
 Schedule::command('vkusvill:collect-vacancies')
     ->cron('0 7 * * 0')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'vkusvill']);
@@ -138,6 +181,7 @@ Schedule::command('vkusvill:collect-vacancies')
 
 Schedule::command('vkusvill:collect-vacancies --section=all')
     ->cron('0 7 * * 0')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'vkusvill-all']);
@@ -147,35 +191,23 @@ Schedule::command('vkusvill:collect-vacancies --section=all')
     })
     ->withoutOverlapping();
 
-Schedule::command('wb:generate-courier-vacancies')
-    ->cron('0 7 * * 0')
-    ->appendOutputTo('/proc/1/fd/1')
-    ->withoutOverlapping();
-
-Schedule::command('wb:generate-driver-ce-vacancies')
-    ->cron('0 7 * * 0')
-    ->appendOutputTo('/proc/1/fd/1')
-    ->withoutOverlapping();
-
-Schedule::command('wb:generate-driver-b-vacancies')
-    ->cron('0 7 * * 0')
-    ->appendOutputTo('/proc/1/fd/1')
-    ->withoutOverlapping();
-
-Schedule::command('wb:generate-storage-vacancies')
-    ->cron('0 7 * * 0')
-    ->appendOutputTo('/proc/1/fd/1')
-    ->withoutOverlapping();
-
 // Купер
 Schedule::command('kuper:collect-vacancies')
     ->cron('0 7 * * 0')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'kuper']);
+        if ($exitCode !== 0) {
+            Log::error('Не удалось создать архив фида kuper', ['output' => Artisan::output()]);
+        }
+    })
     ->withoutOverlapping();
 
 // HireHi
 Schedule::command('hirehi:parse-vacancies')
-    ->cron('0 4 * * 0')
+    ->cron('0 4 * * 3')
+    ->timezone('Europe/Moscow')
     ->appendOutputTo('/proc/1/fd/1')
     ->onSuccess(function () {
         $exitCode = Artisan::call('xml:tar', ['source' => 'hirehi']);
@@ -188,19 +220,14 @@ Schedule::command('hirehi:parse-vacancies')
 
 // Gossluzhba
 Schedule::command('gossluzhba:collect-vacancies --details-limit=0 --sleep-ms=1500 --refresh-days=30 --without-tls-verify')
-    ->cron('0 7 * * 0')
+    ->cron('0 7 * * 5')
+    ->timezone('Europe/Moscow')
     ->when(fn () => !filter_var(env('GOSSLUZHBA_EXTERNAL_RUNNER', false), FILTER_VALIDATE_BOOLEAN))
     ->appendOutputTo('/proc/1/fd/1')
-    ->withoutOverlapping();
-
-// Создание архивов
-Schedule::command('xml:tar gossluzhba')
-    ->cron('0 10 * * 0')
-    ->when(fn () => !filter_var(env('GOSSLUZHBA_EXTERNAL_RUNNER', false), FILTER_VALIDATE_BOOLEAN))
-    ->appendOutputTo('/proc/1/fd/1')
-    ->withoutOverlapping();
-
-Schedule::command('xml:tar --exclude=hirehi --exclude=ozon --exclude=perekrestok --exclude=krasnoeibeloe --exclude=gossluzhba')
-    ->cron('0 7 * * 0')
-    ->appendOutputTo('/proc/1/fd/1')
+    ->onSuccess(function () {
+        $exitCode = Artisan::call('xml:tar', ['source' => 'gossluzhba']);
+        if ($exitCode !== 0) {
+            Log::error('Не удалось создать архив фида gossluzhba', ['output' => Artisan::output()]);
+        }
+    })
     ->withoutOverlapping();
