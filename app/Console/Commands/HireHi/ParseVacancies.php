@@ -471,6 +471,7 @@ class ParseVacancies extends Command
                     ->withOptions($proxy === null ? [] : ['proxy' => $proxy])
                     ->withHeaders([
                         'User-Agent' => 'Mozilla/5.0 (compatible; vacancy-feed/1.0)',
+                        'Accept-Language' => 'ru-RU,ru;q=0.9',
                         'Referer' => 'https://hirehi.ru/',
                         'X-Requested-With' => 'XMLHttpRequest',
                     ])
@@ -562,6 +563,7 @@ class ParseVacancies extends Command
                     ->withOptions(['proxy' => $proxy])
                     ->withHeaders([
                         'User-Agent' => 'Mozilla/5.0 (compatible; vacancy-feed/1.0)',
+                        'Accept-Language' => 'ru-RU,ru;q=0.9',
                         'Referer' => 'https://hirehi.ru/',
                         'X-Requested-With' => 'XMLHttpRequest',
                     ])

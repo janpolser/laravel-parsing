@@ -105,10 +105,10 @@ test('a complete multi-page feed contains every vacancy', function () {
     ])->assertSuccessful();
 
     expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(2);
-    Http::assertSentCount(11);
+    Http::assertSentCount(5);
 });
 
-test('a changed total during initial listing is reconciled before any detail request', function () {
+test('a single list pass is used before detail requests', function () {
     $listCalls = 0;
     $requests = [];
     Http::fake(function (Request $request) use (&$listCalls, &$requests) {
@@ -134,16 +134,14 @@ test('a changed total during initial listing is reconciled before any detail req
         '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
     ])->assertSuccessful();
 
-    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(2)
-        ->and($listCalls)->toBe(5)
+    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(1)
+        ->and($listCalls)->toBe(1)
         ->and($requests[1])->toContain('get-vacancies')
-        ->and($requests[2])->toContain('get-vacancies')
-        ->and($requests[3])->toContain('get-vacancies')
-        ->and($requests[4])->not->toContain('get-vacancies')
-        ->and(json_decode(File::get(storage_path('app/gossluzhba/state/list-snapshot.json')), true)['count'])->toBe(2);
+        ->and($requests[2])->not->toContain('get-vacancies')
+        ->and(json_decode(File::get(storage_path('app/gossluzhba/state/list-snapshot.json')), true)['count'])->toBe(1);
 });
 
-test('a total changing between pages is rechecked before detail collection', function () {
+test('a small total change between pages is accepted without rescanning', function () {
     $listCalls = 0;
     $detailListCounts = [];
     Http::fake(function (Request $request) use (&$listCalls, &$detailListCounts) {
@@ -169,11 +167,11 @@ test('a total changing between pages is rechecked before detail collection', fun
         '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
     ])->assertSuccessful();
 
-    expect($detailListCounts)->toBe([6, 6, 6])
+    expect($detailListCounts)->toBe([2, 2, 2])
         ->and(substr_count(File::get($this->output), '<vacancy>'))->toBe(3);
 });
 
-test('a vacancy added while collecting details is reconciled before publication', function () {
+test('a vacancy added after the list pass is left to the next run', function () {
     $detailCalls = [];
     Http::fake(function (Request $request) use (&$detailCalls) {
         $path = parse_url($request->url(), PHP_URL_PATH);
@@ -197,11 +195,11 @@ test('a vacancy added while collecting details is reconciled before publication'
         '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
     ])->assertSuccessful();
 
-    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(2)
-        ->and($detailCalls)->toBe(['1', '2']);
+    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(1)
+        ->and($detailCalls)->toBe(['1']);
 });
 
-test('a disappeared vacancy with 404 is excluded only after list reconciliation', function () {
+test('a disappeared vacancy with 404 is excluded without rescanning', function () {
     $missingSeen = false;
     Http::fake(function (Request $request) use (&$missingSeen) {
         $path = parse_url($request->url(), PHP_URL_PATH);
@@ -233,7 +231,7 @@ test('a disappeared vacancy with 404 is excluded only after list reconciliation'
         ->and(File::get($this->output))->toContain('/vacancy/2');
 });
 
-test('a continually changing list preserves the previous feed', function () {
+test('one scan does not make requests to check subsequent changes', function () {
     $listCalls = 0;
     Http::fake(function (Request $request) use (&$listCalls) {
         $path = parse_url($request->url(), PHP_URL_PATH);
@@ -252,9 +250,9 @@ test('a continually changing list preserves the previous feed', function () {
 
     $this->artisan('gossluzhba:collect-vacancies', [
         '--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000,
-    ])->assertFailed();
+    ])->assertSuccessful();
 
-    expect(File::get($this->output))->toBe('<previous/>')->and($listCalls)->toBe(5);
+    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(1)->and($listCalls)->toBe(1);
 });
 
 test('repeated duplicate pages never publish a partial snapshot', function () {
@@ -271,7 +269,7 @@ test('repeated duplicate pages never publish a partial snapshot', function () {
     ])->assertFailed();
 
     expect(File::get($this->output))->toBe('<previous/>');
-    Http::assertSentCount(7);
+    Http::assertSentCount(3);
 });
 
 test('a second collector cannot start while the source is locked', function () {
@@ -291,7 +289,7 @@ test('a second collector cannot start while the source is locked', function () {
     }
 });
 
-test('a failed run preserves progress and does not refetch a cached successful detail', function () {
+test('a later run reuses a cached successful detail after a vacancy was skipped', function () {
     $failSecond = true;
     $detailCalls = [];
     Http::fake(function (Request $request) use (&$failSecond, &$detailCalls) {
@@ -319,8 +317,8 @@ test('a failed run preserves progress and does not refetch a cached successful d
     });
     $options = ['--request-delay-min-ms' => 2000, '--request-delay-max-ms' => 2000];
 
-    $this->artisan('gossluzhba:collect-vacancies', $options)->assertFailed();
-    expect(File::get($this->output))->toBe('<previous/>')
+    $this->artisan('gossluzhba:collect-vacancies', $options)->assertSuccessful();
+    expect(substr_count(File::get($this->output), '<vacancy>'))->toBe(1)
         ->and(File::exists(storage_path('app/gossluzhba/cache/details/1.json')))->toBeTrue();
     $failSecond = false;
     $this->artisan('gossluzhba:collect-vacancies', $options)->assertSuccessful();

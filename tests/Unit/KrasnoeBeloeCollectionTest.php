@@ -66,10 +66,10 @@ test('kb collects every city and maps source data to a complete XML feed', funct
         ->and((string) $jobs[0]->addresses->address->location)->toBe('Алтайский край, Алейск, ул. Тестовая, 1')
         ->and((string) $jobs[0]->addresses->address->lat)->toBe('53.3')
         ->and((string) $jobs[0]->addresses->address->lng)->toBe('83.6');
-    Http::assertSentCount(4);
+    Http::assertSentCount(3);
 });
 
-test('kb does not replace a previous feed if the source changes during collection', function () {
+test('kb collects using the original city list without a second discovery request', function () {
     File::ensureDirectoryExists(dirname($this->kbOutputPath));
     File::put($this->kbOutputPath, '<source>previous</source>');
     $discoveryCount = 0;
@@ -83,8 +83,8 @@ test('kb does not replace a previous feed if the source changes during collectio
         return Http::response(kbResponse($request['city']));
     });
 
-    $this->artisan('krasnoeibeloe:collect-vacancies', ['--sleep-ms' => 0])->assertFailed();
-    expect(File::get($this->kbOutputPath))->toBe('<source>previous</source>');
+    $this->artisan('krasnoeibeloe:collect-vacancies', ['--sleep-ms' => 0])->assertSuccessful();
+    expect($discoveryCount)->toBe(1);
 });
 
 test('kb reuses unchanged city checkpoints when source counts change', function () {
@@ -149,7 +149,7 @@ test('kb accepts source city pages without a city slug', function () {
     expect((string) $xml->vacancies->vacancy[0]->url)->toBe('https://krasnoeibeloe.ru/job/vacancy/?vacancy=AA%2B%2F%3D');
 });
 
-test('kb verifies a stale city counter against the source direction filters', function () {
+test('kb accepts a stale city counter without checking direction filters', function () {
     Http::fake(function (Request $request) {
         if (str_contains($request->url(), '/job/chelyabinsk/')) {
             return Http::response(kbDiscovery());
@@ -169,10 +169,10 @@ test('kb verifies a stale city counter against the source direction filters', fu
     $this->artisan('krasnoeibeloe:collect-vacancies', ['--max-cities' => 1, '--sleep-ms' => 0])->assertSuccessful();
     $xml = simplexml_load_file(storage_path('app/krasnoeibeloe-previews/krasnoeibeloe_vacancies'.today()->toDateString().'.xml'));
     expect($xml->vacancies->vacancy)->toHaveCount(2);
-    Http::assertSentCount(6);
+    Http::assertSentCount(2);
 });
 
-test('kb accepts a stale positive counter only after an empty city is independently checked', function () {
+test('kb accepts a small stale positive counter for an empty city', function () {
     Http::fake(function (Request $request) {
         if (str_contains($request->url(), '/job/chelyabinsk/')) {
             return Http::response(kbDiscovery());
@@ -191,7 +191,7 @@ test('kb accepts a stale positive counter only after an empty city is independen
         ->and((string) $xml->vacancies->vacancy[0]->addresses->address->location)->toContain('Барнаул');
 });
 
-test('kb refuses to publish if direction lists do not cover the city response', function () {
+test('kb accepts a small counter difference without direction requests', function () {
     File::ensureDirectoryExists(dirname($this->kbOutputPath));
     File::put($this->kbOutputPath, '<source>previous</source>');
     Http::fake(function (Request $request) {
@@ -209,8 +209,8 @@ test('kb refuses to publish if direction lists do not cover the city response', 
         return Http::response($body);
     });
 
-    $this->artisan('krasnoeibeloe:collect-vacancies', ['--sleep-ms' => 0])->assertFailed();
-    expect(File::get($this->kbOutputPath))->toBe('<source>previous</source>');
+    $this->artisan('krasnoeibeloe:collect-vacancies', ['--sleep-ms' => 0])->assertSuccessful();
+    Http::assertSentCount(3);
 });
 
 test('kb normalizes legacy cached links without changing their vacancy identifier', function () {

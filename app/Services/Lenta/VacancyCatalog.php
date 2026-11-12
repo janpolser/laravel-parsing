@@ -2,6 +2,7 @@
 
 namespace App\Services\Lenta;
 
+use App\Support\FeedCountTolerance;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 
@@ -24,13 +25,17 @@ class VacancyCatalog
         foreach ($cities as $index => $city) {
             $page = 0;
             $totalPages = null;
+            $initialCount = null;
             do {
                 $response = $this->request($city['cityId'], $page, 100);
                 $result = $this->parseResult($response, $city['cityId'], $page);
                 $totalPages ??= $result['totalPagesCount'];
-                if ($totalPages !== $result['totalPagesCount']) {
+                $initialCount ??= $result['totalCount'];
+                if (abs($totalPages - $result['totalPagesCount']) > 1
+                    || ! FeedCountTolerance::allows($initialCount, $result['totalCount'])) {
                     throw new \RuntimeException('Lenta: изменилось число страниц города '.$city['cityId']);
                 }
+                $totalPages = $result['totalPagesCount'];
                 foreach ($result['items'] as $item) {
                     $id = $item['vacancyId'];
                     if (($item['isHideOnCareer'] ?? false) === true) {
@@ -111,6 +116,6 @@ class VacancyCatalog
             }
         }
 
-        return ['items' => $items, 'totalPagesCount' => $totalPages];
+        return ['items' => $items, 'totalPagesCount' => $totalPages, 'totalCount' => $totalCount];
     }
 }

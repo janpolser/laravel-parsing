@@ -71,10 +71,8 @@ test('rzhd leaves the previous feed intact when the list is incomplete', functio
 })->with([
     'HTTP error' => [[], 503],
     'empty page' => [rzhdListPage([], 2, 502, 2), 200],
-    'short catalogue' => [rzhdListPage([501], 2, 502, 2), 200],
-    'duplicate vacancy ID across pages' => [rzhdListPage([500, 501], 2, 502, 2), 200],
     'API repeats the first page' => [rzhdListPage([501, 502], 1, 502, 2), 200],
-    'catalogue changes while paging' => [rzhdListPage([501, 502], 2, 503, 2), 200],
+    'large catalogue change while paging' => [rzhdListPage([501, 502], 2, 520, 2), 200],
     'page metadata is missing' => [['data' => [['id' => 501]]], 200],
     'page metadata is not an object' => [['meta' => 'invalid', 'data' => [['id' => 501]]], 200],
     'vacancy ID is missing' => [[
@@ -82,3 +80,16 @@ test('rzhd leaves the previous feed intact when the list is incomplete', functio
         'data' => [['position_title' => 'Машинист']],
     ], 200],
 ]);
+
+test('rzhd accepts a small catalogue change and deduplicates shifted pages', function () {
+    Http::fake([
+        'https://team.rzd.ru/api/v1/career/vacancies?*' => Http::sequence()
+            ->push(rzhdListPage(range(1, 500), 1, 502, 2))
+            ->push(rzhdListPage([500, 501], 2, 501, 2)),
+        'https://team.rzd.ru/api/v1/career/vacancies/*' => Http::response(['responsibilities' => 'Работа']),
+    ]);
+
+    $this->artisan('rzhd:collect-vacancies')->assertSuccessful();
+    $xml = simplexml_load_file($this->rzhdOutputPath);
+    expect($xml->vacancies->vacancy)->toHaveCount(501);
+});

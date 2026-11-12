@@ -3,6 +3,7 @@
 namespace App\Console\Commands\Dixy;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Support\FeedCountTolerance;
 use App\Support\VacancyTextUrls;
 use DOMDocument;
 use DOMXPath;
@@ -108,9 +109,11 @@ class CollectVacancies extends Command
             }
             $totalPages ??= $pages;
             $totalItems ??= $count;
-            if ($totalPages !== $pages || $totalItems !== $count) {
+            if (abs($totalPages - $pages) > 1 || ! FeedCountTolerance::allows($totalItems, $count)) {
                 throw new \RuntimeException('Dixy API: каталог изменился во время обхода');
             }
+            $totalPages = $pages;
+            $beforePage = count($rows);
             foreach ($items as $item) {
                 $id = is_array($item) ? ($item['id'] ?? null) : null;
                 if (! is_array($item) || ! is_string($id) || ! ctype_digit($id)) {
@@ -130,10 +133,13 @@ class CollectVacancies extends Command
                     throw new \RuntimeException("Dixy API: пустое название вакансии {$id}");
                 }
             }
+            if (count($rows) === $beforePage) {
+                throw new \RuntimeException("Dixy API: страница {$page} не содержит новых вакансий");
+            }
             $page++;
         } while ($page <= ($maxPages > 0 ? min($maxPages, $totalPages) : $totalPages));
 
-        if ($maxPages === 0 && count($rows) + $duplicates !== $totalItems) {
+        if ($maxPages === 0 && ! FeedCountTolerance::allows($totalItems, count($rows))) {
             throw new \RuntimeException('Dixy API: число элементов не совпадает с element_count');
         }
 

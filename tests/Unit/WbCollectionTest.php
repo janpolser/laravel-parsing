@@ -44,6 +44,21 @@ function wbCollectionDetail(Request $request)
     ]);
 }
 
+test('wb tolerates a small change and repeated ID without extra list requests', function () {
+    Http::fake([
+        'https://career.wb.ru/' => Http::response('<html/>'),
+        'https://career.wb.ru/crm-api/api/v1/pub/vacancies?*' => Http::sequence()
+            ->push(wbCollectionPage([1, 2], 0, 5))
+            ->push(wbCollectionPage([2, 3], 2, 4)),
+        'https://career.wb.ru/crm-api/api/v1/pub/vacancies/*' => fn (Request $request) => wbCollectionDetail($request),
+    ]);
+    $this->artisan('wb:collect-wb-vacancies')->assertSuccessful();
+    $xml = simplexml_load_file($this->wbOutputPath);
+    expect($xml->vacancies->vacancy)->toHaveCount(3);
+    $list = Http::recorded(fn ($request) => parse_url($request->url(), PHP_URL_PATH) === '/crm-api/api/v1/pub/vacancies');
+    expect($list)->toHaveCount(2);
+});
+
 test('wb paginates by the returned page size and keeps details distinct for equal titles', function () {
     Http::fake([
         'https://career.wb.ru/' => Http::response('<html/>'),
@@ -136,10 +151,8 @@ test('wb preserves the previous feed when pagination is incomplete or invalid', 
 })->with([
     'HTTP failure' => [[], 503],
     'empty page before total is reached' => [wbCollectionPage([], 2, 4), 200],
-    'duplicate ID across pages' => [wbCollectionPage([2, 3], 2, 4), 200],
     'repeated page' => [wbCollectionPage([1, 2], 2, 4), 200],
     'response offset differs from requested offset' => [wbCollectionPage([3, 4], 0, 4), 200],
-    'total changes during pagination' => [wbCollectionPage([3, 4], 2, 5), 200],
     'range metadata is missing' => [['status' => 200, 'data' => ['items' => [['id' => 3, 'name' => 'Менеджер']]]], 200],
     'range metadata is not an object' => [['status' => 200, 'data' => ['items' => [], 'range' => 'invalid']], 200],
     'items is not an array' => [['status' => 200, 'data' => ['items' => 'invalid', 'range' => ['count' => 4, 'offset' => 2]]], 200],

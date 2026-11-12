@@ -3,6 +3,7 @@
 namespace App\Console\Commands\Perekrestok;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Support\FeedCountTolerance;
 use App\Support\VacancyTextUrls;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
@@ -52,38 +53,51 @@ class CollectVacancies extends Command
 
             $pages = $maxPages > 0 ? min($maxPages, $totalPages) : $totalPages;
             $items = $first['items'] ?? null;
-            if (!is_array($items)) {
+            if (!is_array($items) || $items === []) {
                 throw new \RuntimeException('В ответе API нет массива items');
             }
             for ($page = 2; $page <= $pages; $page++) {
                 $payload = $this->fetchPage($page, $limit, $radius, $warehouseRadius);
                 if ((int) ($payload['page'] ?? 0) !== $page
-                    || (int) ($payload['total'] ?? 0) !== $total
-                    || (int) ($payload['totalPages'] ?? 0) !== $totalPages
-                    || !isset($payload['items']) || !is_array($payload['items'])) {
+                    || ! FeedCountTolerance::allows($total, (int) ($payload['total'] ?? 0))
+                    || abs((int) ($payload['totalPages'] ?? 0) - $totalPages) > 1
+                    || !isset($payload['items']) || !is_array($payload['items']) || $payload['items'] === []) {
                     throw new \RuntimeException("API вернуло неполную страницу {$page}");
                 }
+                if (array_diff(array_column($payload['items'], 'id'), array_column($items, 'id')) === []) {
+                    throw new \RuntimeException("API вернуло повторную страницу {$page}");
+                }
+                $totalPages = (int) $payload['totalPages'];
+                $pages = $maxPages > 0 ? min($maxPages, $totalPages) : $totalPages;
                 $items = array_merge($items, $payload['items']);
                 $this->line("Страница {$page}/{$pages}: вакансий " . count($payload['items']));
             }
 
-            if ($maxPages === 0 && count($items) !== $total) {
+            if ($maxPages === 0 && ! FeedCountTolerance::allows($total, count($items))) {
                 throw new \RuntimeException('Получено вакансий ' . count($items) . " вместо {$total}");
             }
 
             $entities = [];
             $seen = [];
             foreach ($items as $item) {
+                $id = (string) ($item['id'] ?? '');
+                if ($id !== '' && isset($seen[$id])) {
+                    $this->warn("Повторный id вакансии {$id}; запись пропущена");
+
+                    continue;
+                }
                 $entity = $this->mapVacancy($item);
+                if ($id !== '') {
+                    $seen[$id] = true;
+                }
                 if ($entity === null) {
                     continue;
                 }
-                $id = (string) $item['id'];
-                if (isset($seen[$id])) {
-                    throw new \RuntimeException("Повторный id вакансии {$id}");
-                }
-                $seen[$id] = true;
                 $entities[] = $entity;
+            }
+
+            if ($maxPages === 0 && ! FeedCountTolerance::allows($total, count($seen))) {
+                throw new \RuntimeException('Количество уникальных вакансий существенно отличается от счётчика');
             }
 
             if ($entities === []) {

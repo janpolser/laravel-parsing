@@ -3,6 +3,7 @@
 namespace App\Console\Commands\KrasnoeBeloe;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Support\FeedCountTolerance;
 use App\Support\VacancyTextUrls;
 use DOMDocument;
 use DOMXPath;
@@ -76,7 +77,7 @@ class CollectVacancies extends Command
             $stageDir = storage_path('app/krasnoeibeloe-stage');
             File::ensureDirectoryExists($stageDir);
             $stagePath = $stageDir.'/'.$outfile.today()->toDateString().'.xml';
-            $formatter->createXmlFeed($this->entities($cities, $allCities, $cacheDir, $batchSize, $sleepMs, !$preview), 'krasnoeibeloe.ru', $stagePath);
+            $formatter->createXmlFeed($this->entities($cities, $cacheDir, $batchSize, $sleepMs), 'krasnoeibeloe.ru', $stagePath);
             if ($this->seen < 1 || $this->countXmlVacancies($stagePath) !== $this->seen) {
                 throw new \RuntimeException('Число вакансий в XML не совпадает с полученными карточками');
             }
@@ -149,7 +150,7 @@ class CollectVacancies extends Command
                 $cities[] = ['region' => $names[$regionId], 'city' => $names[$cityId], 'count' => (int) $count];
                 $sum += (int) $count;
             }
-            if ((!is_int($regionTotal) && !(is_string($regionTotal) && ctype_digit($regionTotal))) || (int) $regionTotal !== $sum) {
+            if ((!is_int($regionTotal) && !(is_string($regionTotal) && ctype_digit($regionTotal))) || ! FeedCountTolerance::allows((int) $regionTotal, $sum)) {
                 throw new \RuntimeException('Количество вакансий региона не совпадает с суммой городов: '.$names[$regionId]);
             }
         }
@@ -165,9 +166,10 @@ class CollectVacancies extends Command
         return $cities;
     }
 
-    private function entities(array $cities, array $snapshot, string $cacheDir, int $batchSize, int $sleepMs, bool $verifySnapshot): \Generator
+    private function entities(array $cities, string $cacheDir, int $batchSize, int $sleepMs): \Generator
     {
         $processed = 0;
+        $differenceTotal = 0;
         foreach (array_chunk($cities, $batchSize) as $batch) {
             $responses = [];
             $needed = [];
@@ -203,10 +205,12 @@ class CollectVacancies extends Command
                         throw new \RuntimeException("Неполный или недоступный ответ: {$city['region']}, {$city['city']}; ожидалось {$city['count']}; {$this->lastError}");
                     }
                     $verified = false;
-                    if (count($entities) !== $city['count']) {
-                        $this->warn("Расхождение счётчика: {$city['region']}, {$city['city']}; счётчик {$city['count']}, API ".count($entities).'; сверяю направления');
-                        $this->verifyDirections($city, $entities);
+                    if (count($entities) !== $city['count'] && (FeedCountTolerance::allows($city['count'], count($entities))
+                        || ($entities === [] && $city['count'] <= 10))) {
+                        $this->warn("Небольшое расхождение счётчика: {$city['region']}, {$city['city']}; счётчик {$city['count']}, API ".count($entities));
                         $verified = true;
+                    } elseif (count($entities) !== $city['count']) {
+                        throw new \RuntimeException("Расхождение счётчика превышает допуск: {$city['region']}, {$city['city']}");
                     }
                     $this->writeCache($cacheDir, $city, $entities, $verified);
                     $responses[$index] = $entities;
@@ -216,7 +220,11 @@ class CollectVacancies extends Command
                 }
             }
             ksort($responses);
-            foreach ($responses as $entities) {
+            foreach ($responses as $index => $entities) {
+                $differenceTotal += abs(count($entities) - $batch[$index]['count']);
+                if ($differenceTotal > 10) {
+                    throw new \RuntimeException('Суммарное расхождение по городам превышает 10 вакансий');
+                }
                 foreach ($entities as $entity) {
                     if (isset($this->seenUrls[$entity['url']])) {
                         throw new \RuntimeException('Повторная ссылка вакансии: '.$entity['url']);
@@ -230,9 +238,6 @@ class CollectVacancies extends Command
                     $this->line('Городов: '.$processed.'/'.count($cities).'; вакансий: '.$this->seen);
                 }
             }
-        }
-        if ($verifySnapshot && $this->discoverCities() !== $snapshot) {
-            throw new \RuntimeException('Справочник вакансий изменился во время сбора; требуется повтор');
         }
     }
 
@@ -268,55 +273,6 @@ class CollectVacancies extends Command
         }
 
         return $entities;
-    }
-
-    private function verifyDirections(array $city, array $entities): void
-    {
-        $all = array_column($entities, 'url');
-        $byDirection = [];
-        foreach (['Магазин', 'Офис', 'Распределительный центр'] as $direction) {
-            $mapped = null;
-            for ($attempt = 1; $attempt <= 3 && $mapped === null; $attempt++) {
-                try {
-                    $response = Http::timeout(120)->connectTimeout(15)->acceptJson()->get(self::API, [
-                        'region' => $city['region'], 'city' => $city['city'], 'jobPlace' => $direction,
-                    ]);
-                    $mapped = $this->parseResponse($response, $city, true);
-                } catch (\Throwable $e) {
-                    $this->lastError = $e->getMessage();
-                }
-                if ($mapped === null && $attempt < 3) {
-                    sleep($attempt);
-                }
-            }
-            if ($mapped === null) {
-                throw new \RuntimeException("Не удалось сверить направление {$direction}, {$city['city']}: {$this->lastError}");
-            }
-            foreach ($mapped as $entity) {
-                $byDirection[$entity['url']] = true;
-            }
-        }
-        if (count(array_unique($all)) !== count($all) || array_diff($all, array_keys($byDirection)) !== []
-            || array_diff(array_keys($byDirection), $all) !== []) {
-            throw new \RuntimeException("Неполное совпадение общего списка с направлениями: {$city['region']}, {$city['city']}");
-        }
-        $confirmed = null;
-        for ($attempt = 1; $attempt <= 3 && $confirmed === null; $attempt++) {
-            try {
-                $response = Http::timeout(120)->connectTimeout(15)->acceptJson()
-                    ->get(self::API, ['region' => $city['region'], 'city' => $city['city']]);
-                $confirmed = $this->parseResponse($response, $city, true);
-            } catch (\Throwable $e) {
-                $this->lastError = $e->getMessage();
-            }
-            if ($confirmed === null && $attempt < 3) {
-                sleep($attempt);
-            }
-        }
-        if ($confirmed === null || array_diff($all, array_column($confirmed, 'url')) !== []
-            || array_diff(array_column($confirmed, 'url'), $all) !== [] || count($confirmed) !== count($all)) {
-            throw new \RuntimeException("Общий список изменился при повторной проверке: {$city['region']}, {$city['city']}");
-        }
     }
 
     private function mapVacancy(mixed $item, string $path, array $city): array

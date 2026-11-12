@@ -2,6 +2,7 @@
 
 namespace App\Services\Ozon;
 
+use App\Support\FeedCountTolerance;
 use Illuminate\Support\Facades\Http;
 
 class VacancyCatalog
@@ -38,24 +39,29 @@ class VacancyCatalog
 
             $expectedTotal ??= $meta['totalItems'];
             $expectedPages ??= $meta['totalPages'];
-            if ($expectedTotal !== $meta['totalItems'] || $expectedPages !== $meta['totalPages']) {
+            if (! FeedCountTolerance::allows($expectedTotal, $meta['totalItems']) || abs($expectedPages - $meta['totalPages']) > 1) {
                 throw new \RuntimeException('Ozon: каталог изменился во время обхода');
             }
+            $expectedPages = $meta['totalPages'];
 
+            $beforePage = count($rows);
             foreach ($items as $item) {
                 $id = is_array($item) ? ($item['internalUuid'] ?? null) : null;
                 if (!is_string($id) || !preg_match('/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i', $id)
                     || !is_string($item['title'] ?? null) || trim($item['title']) === ''
-                    || !is_string($item['vacancyType'] ?? null) || isset($rows[$id])) {
+                    || !is_string($item['vacancyType'] ?? null)) {
                     throw new \RuntimeException("Ozon: некорректная или повторная вакансия на странице {$page}");
                 }
                 $rows[$id] = $item;
+            }
+            if (count($rows) === $beforePage) {
+                throw new \RuntimeException("Ozon: страница {$page} не содержит новых вакансий");
             }
 
             $page++;
         } while ($page <= $expectedPages && ($maxPages === 0 || $page <= $maxPages));
 
-        if (($maxPages === 0 || $maxPages >= $expectedPages) && count($rows) !== $expectedTotal) {
+        if (($maxPages === 0 || $maxPages >= $expectedPages) && ! FeedCountTolerance::allows($expectedTotal, count($rows))) {
             throw new \RuntimeException('Ozon: число уникальных вакансий не совпадает с totalItems');
         }
 

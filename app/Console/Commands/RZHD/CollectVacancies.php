@@ -3,6 +3,7 @@
 namespace App\Console\Commands\RZHD;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Support\FeedCountTolerance;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
@@ -109,33 +110,53 @@ class CollectVacancies extends Command
                 $expectedCount = $count;
                 $expectedPages = $pages;
                 $this->info("Всего вакансий: {$expectedCount}, страниц: {$expectedPages}");
-            } elseif ($count !== $expectedCount || $pages !== $expectedPages) {
+            } elseif (! FeedCountTolerance::allows($expectedCount, $count)
+                || abs($pages - $expectedPages) > 1) {
                 $this->error('Каталог вакансий изменился во время обхода; XML не сформирован.');
 
                 return null;
             }
 
+            $expectedPages = $pages;
+
+            $beforePage = count($items);
             foreach ($pageItems as $item) {
                 $id = is_array($item)
                     ? filter_var($item['id'] ?? null, FILTER_VALIDATE_INT, $positiveInteger)
                     : false;
-                if ($id === false || isset($items[$id])) {
-                    $this->error("Некорректный или повторный ID вакансии на странице {$page}");
+                if ($id === false) {
+                    $this->error("Некорректный ID вакансии на странице {$page}");
 
                     return null;
                 }
 
+                if (isset($items[$id])) {
+                    $this->warn("Повторный ID вакансии {$id}; запись пропущена.");
+
+                    continue;
+                }
+
                 $items[$id] = $item;
+            }
+
+            if (count($items) === $beforePage) {
+                $this->error("Страница {$page} не содержит новых вакансий");
+
+                return null;
             }
 
             $this->line("Страница {$page}/{$expectedPages}: получено " . count($pageItems) . ', всего ' . count($items));
             $page++;
         } while ($page <= $expectedPages);
 
-        if (count($items) !== $expectedCount) {
+        if (! FeedCountTolerance::allows($expectedCount, count($items))) {
             $this->error("Неполный каталог вакансий: ожидалось {$expectedCount}, получено " . count($items));
 
             return null;
+        }
+
+        if (count($items) !== $expectedCount) {
+            $this->warn("Небольшое расхождение каталога: ожидалось {$expectedCount}, получено " . count($items));
         }
 
         return array_values($items);

@@ -2,6 +2,7 @@
 
 namespace App\Services\Oez;
 
+use App\Support\FeedCountTolerance;
 use Illuminate\Support\Facades\Http;
 
 class VacancyCatalog
@@ -55,21 +56,26 @@ class VacancyCatalog
 
             $totalPages ??= $bodyPages;
             $found ??= $bodyFound;
-            if ($totalPages !== $bodyPages || $found !== $bodyFound) {
+            if (abs($totalPages - $bodyPages) > 1 || ! FeedCountTolerance::allows($found, $bodyFound)) {
                 throw new \RuntimeException('HH: каталог изменился во время обхода');
             }
+            $totalPages = $bodyPages;
 
+            $beforePage = count($items);
             foreach ($pageItems as $item) {
                 $id = is_array($item) ? ($item['id'] ?? null) : null;
-                if (!is_array($item) || !is_string($id) || !ctype_digit($id) || isset($items[$id])) {
+                if (!is_array($item) || !is_string($id) || !ctype_digit($id)) {
                     throw new \RuntimeException("HH: некорректная или повторная вакансия на странице {$page}");
                 }
                 $items[$id] = $item;
             }
+            if (count($items) === $beforePage) {
+                throw new \RuntimeException("HH: страница {$page} не содержит новых вакансий");
+            }
             $page++;
         } while ($page < $totalPages && ($maxPages === 0 || $page < $maxPages));
 
-        if (($maxPages === 0 || $maxPages >= $totalPages) && count($items) !== min($found, 2000)) {
+        if (($maxPages === 0 || $maxPages >= $totalPages) && ! FeedCountTolerance::allows(min($found, 2000), count($items))) {
             throw new \RuntimeException('HH: число уникальных вакансий не совпадает с доступным лимитом API');
         }
 

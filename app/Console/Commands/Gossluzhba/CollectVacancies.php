@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands\Gossluzhba;
 
+use App\Support\FeedCountTolerance;
 use App\Support\VacancyTextUrls;
 use Illuminate\Console\Command;
 use Illuminate\Http\Client\Response;
@@ -141,62 +142,56 @@ class CollectVacancies extends Command
             $snapshot = $this->collectStableSnapshot($pageSize, $maxPages, $filters);
             $this->saveListSnapshot($snapshot, $filters);
 
-            for ($round = 0; $round <= 2; $round++) {
-                $processed = 0;
-                foreach ($snapshot as $id => $summary) {
-                    $id = (string) $id;
-                    $summaryHash = $this->summaryHash($summary);
-                    if (($ready[$id] ?? null) === $summaryHash) {
-                        $processed++;
+            $processed = 0;
+            foreach ($snapshot as $id => $summary) {
+                $id = (string) $id;
+                $summaryHash = $this->summaryHash($summary);
+                if (($ready[$id] ?? null) === $summaryHash) {
+                    $processed++;
+
+                    continue;
+                }
+
+                $this->lastRequestError = null;
+                $detail = $this->resolveDetail($id, $summaryHash, $detailsLimit, $refreshDays);
+                if ($detail === [] && ! $allowSummaryFallback) {
+                    if (str_starts_with($this->lastRequestError ?? '', 'HTTP 404:')
+                        || str_starts_with($this->lastRequestError ?? '', 'HTTP 410:')) {
+                        $missing[$id] = true;
+                        $this->warn("Vacancy {$id} is unavailable; checking the final list.");
+
                         continue;
                     }
-
-                    $this->lastRequestError = null;
-                    $detail = $this->resolveDetail($id, $summaryHash, $detailsLimit, $refreshDays);
-                    if ($detail === [] && ! $allowSummaryFallback) {
-                        if (str_starts_with($this->lastRequestError ?? '', 'HTTP 404:')
-                            || str_starts_with($this->lastRequestError ?? '', 'HTTP 410:')) {
-                            $missing[$id] = true;
-                            $this->warn("Vacancy {$id} is unavailable; checking the final list.");
-                            continue;
-                        }
-                        throw new \RuntimeException("Missing vacancy detail {$id}; previous feed is preserved");
-                    }
-                    unset($missing[$id]);
-                    $entity = $this->mapToEntity($summary, $detail);
-                    if (! $this->isValidEntity($entity)) {
-                        throw new \RuntimeException("Invalid vacancy {$id}; previous feed is preserved");
-                    }
-
-                    $fallback[$id] = $detail === [];
-                    $ready[$id] = $summaryHash;
-                    $this->state[$id] = array_merge($this->state[$id] ?? [], [
-                        'last_seen_at' => Carbon::now(self::TIMEZONE)->toIso8601String(),
-                    ]);
-                    $processed++;
-                    if (++$checkpointCounter % 25 === 0) {
-                        $this->writeState($this->state);
-                    }
-                    if ($processed % 100 === 0) {
-                        $this->line(sprintf('Prepared %d/%d vacancies, detail_requests=%d', $processed, count($snapshot), $this->detailRequests));
-                    }
+                    throw new \RuntimeException("Missing vacancy detail {$id}; previous feed is preserved");
                 }
-                $this->writeState($this->state);
+                unset($missing[$id]);
+                $entity = $this->mapToEntity($summary, $detail);
+                if (! $this->isValidEntity($entity)) {
+                    throw new \RuntimeException("Invalid vacancy {$id}; previous feed is preserved");
+                }
 
-                $latest = $this->collectStableSnapshot($pageSize, $maxPages, $filters);
-                $this->saveListSnapshot($latest, $filters);
-                if ($this->snapshotFingerprint($snapshot) === $this->snapshotFingerprint($latest)) {
-                    if (array_intersect_key($missing, $latest) !== []) {
-                        throw new \RuntimeException('Some listed vacancies have unavailable details; previous feed is preserved');
-                    }
-                    $snapshot = $latest;
-                    break;
+                $fallback[$id] = $detail === [];
+                $ready[$id] = $summaryHash;
+                $this->state[$id] = array_merge($this->state[$id] ?? [], [
+                    'last_seen_at' => Carbon::now(self::TIMEZONE)->toIso8601String(),
+                ]);
+                $processed++;
+                if (++$checkpointCounter % 25 === 0) {
+                    $this->writeState($this->state);
                 }
-                if ($round === 2) {
-                    throw new \RuntimeException('Vacancy catalogue kept changing after bounded reconciliation; previous feed is preserved');
+                if ($processed % 100 === 0) {
+                    $this->line(sprintf('Prepared %d/%d vacancies, detail_requests=%d', $processed, count($snapshot), $this->detailRequests));
                 }
-                $this->warn('Vacancy catalogue changed; reconciling updated and new entries.');
-                $snapshot = $latest;
+            }
+            $this->writeState($this->state);
+
+            if ($missing !== [] && ! FeedCountTolerance::allows(count($snapshot), count($snapshot) - count($missing))) {
+                throw new \RuntimeException('Too many listed vacancies have unavailable details; previous feed is preserved');
+            }
+            if ($missing !== []) {
+                $this->warn('Пропущено удалённых или недоступных вакансий: '.count($missing));
+                $snapshot = array_diff_key($snapshot, $missing);
+                $this->saveListSnapshot($snapshot, $filters);
             }
 
             $writer = $this->openWriter($tmpPath);
@@ -254,26 +249,19 @@ class CollectVacancies extends Command
     /** @return array<string, array> */
     private function collectStableSnapshot(int $pageSize, int $maxPages, array $filters): array
     {
-        $previous = null;
-        for ($attempt = 1; $attempt <= 3; $attempt++) {
-            $scan = $this->scanList($pageSize, $maxPages, $filters);
-            if ($scan['consistent'] && $previous !== null
-                && $this->snapshotFingerprint($previous) === $this->snapshotFingerprint($scan['items'])) {
-                $this->info('Stable list snapshot: '.count($scan['items']).' vacancies');
-
-                return $scan['items'];
-            }
-            $previous = $scan['consistent'] ? $scan['items'] : null;
-            $this->warn("List scan {$attempt} requires confirmation.");
+        $scan = $this->scanList($pageSize, $maxPages, $filters);
+        if (! $scan['consistent']) {
+            throw new \RuntimeException('Vacancy list is incomplete; previous feed is preserved');
         }
 
-        throw new \RuntimeException('Could not obtain a stable vacancy list after three scans; previous feed is preserved');
+        return $scan['items'];
     }
 
     private function scanList(int $pageSize, int $maxPages, array $filters): array
     {
         $page = 1;
         $reportedTotal = null;
+        $initialTotal = null;
         $reportedPages = null;
         $consistent = true;
         $items = [];
@@ -296,26 +284,29 @@ class CollectVacancies extends Command
 
             $pageCount = (int) $list['pageCount'];
             $total = (int) $list['total'];
+            $initialTotal ??= $total;
             if ($pageCount < 1 || $total < 1 || $vacancies === []) {
                 throw new \RuntimeException("Incomplete vacancies payload on page {$page}/{$pageCount}");
             }
-            if (($reportedTotal !== null && $reportedTotal !== $total)
-                || ($reportedPages !== null && $reportedPages !== $pageCount)) {
+            if (! FeedCountTolerance::allows($initialTotal, $total)
+                || ($reportedPages !== null && abs($reportedPages - $pageCount) > 1)) {
                 $consistent = false;
             }
             $reportedTotal = $total;
             $reportedPages = $pageCount;
             $this->line("List page {$page}/{$pageCount}: ".count($vacancies)." vacancies, total={$total}");
 
+            $beforePage = count($items);
             foreach ($vacancies as $summary) {
                 $id = is_array($summary) ? $this->normalizeId($summary['id'] ?? null) : null;
                 if ($id === null) {
                     throw new \RuntimeException("Invalid vacancy ID on page {$page}");
                 }
-                if (isset($items[$id])) {
-                    $consistent = false;
-                }
                 $items[$id] = $summary;
+            }
+
+            if (count($items) === $beforePage) {
+                throw new \RuntimeException("List page {$page} contains no new vacancies");
             }
 
             if ($page >= $pageCount) {
@@ -326,18 +317,7 @@ class CollectVacancies extends Command
 
         ksort($items, SORT_STRING);
 
-        return ['items' => $items, 'consistent' => $consistent && count($items) === $reportedTotal];
-    }
-
-    private function snapshotFingerprint(array $items): string
-    {
-        $hashes = [];
-        foreach ($items as $id => $summary) {
-            $hashes[(string) $id] = $this->summaryHash($summary);
-        }
-        ksort($hashes, SORT_STRING);
-
-        return hash('sha256', json_encode($hashes, JSON_THROW_ON_ERROR));
+        return ['items' => $items, 'consistent' => $consistent && FeedCountTolerance::allows($initialTotal, count($items))];
     }
 
     private function saveListSnapshot(array $items, array $filters): void

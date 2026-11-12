@@ -3,6 +3,7 @@
 namespace App\Console\Commands\WB;
 
 use App\Services\YandexFeedXmlFormat;
+use App\Support\FeedCountTolerance;
 use App\Support\VacancyTextUrls;
 use GuzzleHttp\Cookie\CookieJar;
 use Illuminate\Console\Command;
@@ -126,6 +127,7 @@ class CollectWbVacancies extends Command
         $seenIds = [];
         $pagesFetched = 0;
         $total = null;
+        $initialTotal = null;
         $startOffset = $offset;
 
         while ($maxPages === 0 || $pagesFetched < $maxPages) {
@@ -145,10 +147,11 @@ class CollectWbVacancies extends Command
                 throw new \RuntimeException("Некорректный ответ списка на offset={$offset}");
             }
 
-            $total ??= $range['count'];
-            if ($range['count'] !== $total) {
+            $initialTotal ??= $range['count'];
+            if (! FeedCountTolerance::allows($initialTotal, $range['count'])) {
                 throw new \RuntimeException('Количество вакансий изменилось во время обхода');
             }
+            $total = $range['count'];
             if ($items === []) {
                 if ($offset < $total) {
                     throw new \RuntimeException("Пустая страница на offset={$offset}, всего вакансий: {$total}");
@@ -156,6 +159,7 @@ class CollectWbVacancies extends Command
                 break;
             }
 
+            $beforePage = count($seenIds);
             foreach ($items as $row) {
                 $id = is_array($row) ? ($row['id'] ?? null) : null;
                 if ((!is_int($id) && !is_string($id)) || !ctype_digit((string) $id) || (int) $id < 1
@@ -163,20 +167,26 @@ class CollectWbVacancies extends Command
                     throw new \RuntimeException("Некорректная вакансия на offset={$offset}");
                 }
                 if (isset($seenIds[(int) $id])) {
-                    throw new \RuntimeException("API повторил вакансию ID={$id}");
+                    $this->warn("API повторил вакансию ID={$id}; запись пропущена");
+
+                    continue;
                 }
                 $seenIds[(int) $id] = true;
                 $normalizedRows[] = $this->normalizeRow($row);
+            }
+
+            if (count($seenIds) === $beforePage) {
+                throw new \RuntimeException("Страница offset={$offset} не содержит новых вакансий");
             }
 
             $this->line("Страница: offset={$offset}, получено: " . count($items) . ", всего: {$total}");
             // The API caps its response at 50 even when range.limit echoes 500.
             $offset += count($items);
             $pagesFetched++;
-            if ($offset > $total) {
+            if ($offset > $total && ! FeedCountTolerance::allows($offset, $total)) {
                 throw new \RuntimeException('API вернул больше вакансий, чем указано в range.count');
             }
-            if ($offset === $total) {
+            if ($offset >= $total) {
                 break;
             }
         }
@@ -186,7 +196,7 @@ class CollectWbVacancies extends Command
         }
         if ($offset < $total) {
             $this->warn("Достигнут --max-pages={$maxPages}: собрана только часть каталога");
-        } elseif (count($normalizedRows) !== max(0, $total - $startOffset)) {
+        } elseif (! FeedCountTolerance::allows(max(0, $initialTotal - $startOffset), count($normalizedRows))) {
             throw new \RuntimeException('Не удалось собрать все уникальные вакансии каталога');
         }
 

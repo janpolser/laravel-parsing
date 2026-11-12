@@ -47,6 +47,12 @@ test('ozon API catalog rejects incomplete or inconsistent pages', function ($sec
     'HTTP failure' => [[], 503],
     'empty page' => [ozonApiPage([], 2, 3), 200],
     'duplicate' => [ozonApiPage([2], 2, 3), 200],
-    'changed total' => [ozonApiPage([3], 2, 4), 200],
     'wrong page' => [ozonApiPage([3], 1, 3), 200],
 ]);
+
+test('ozon tolerates a small change in the count without extra requests', function () {
+    Http::preventStrayRequests();
+    Http::fakeSequence()->push(ozonApiPage([1, 2], 1, 3))->push(ozonApiPage([3], 2, 4));
+    expect(app(VacancyCatalog::class)->collect('Москва'))->toHaveCount(3);
+    Http::assertSentCount(2);
+});
